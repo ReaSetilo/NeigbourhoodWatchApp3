@@ -1094,3 +1094,68 @@ export const removeAdmin = async (req, res) => {
         res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
+
+/**users routes */
+//get all users
+export const getAllUsers = async (req, res) => {
+    try {
+        const users = await sql`
+            SELECT 
+                u.user_id,
+                u.email,
+                u.phone_number,
+                u.first_name,
+                u.last_name,
+                u.user_type,
+                u.status,
+                u.is_approved,
+                u.last_login,
+                u.created_at,
+                u.updated_at,
+                CASE 
+                    WHEN u.user_type = 'admin' THEN (
+                        SELECT json_build_object(
+                            'can_modify_system_config', a.can_modify_system_config,
+                            'created_by_admin_id', a.created_by_admin_id
+                        )
+                        FROM administrators a 
+                        WHERE a.admin_id = u.user_id
+                    )
+                    WHEN u.user_type = 'security_officer' THEN (
+                        SELECT json_build_object(
+                            'employee_id', so.employee_id,
+                            'suspension_start_date', so.suspension_start_date,
+                            'suspension_end_date', so.suspension_end_date,
+                            'suspension_reason', so.suspension_reason,
+                            'is_permanently_deleted', so.is_permanently_deleted
+                        )
+                        FROM security_officers so 
+                        WHERE so.officer_id = u.user_id
+                    )
+                    WHEN u.user_type = 'neighborhood_member' THEN (
+                        SELECT json_build_object(
+                            'subscription_status', nm.subscription_status,
+                            'subscription_start_date', nm.subscription_start_date,
+                            'last_payment_date', nm.last_payment_date
+                        )
+                        FROM neighborhood_members nm 
+                        WHERE nm.member_id = u.user_id
+                    )
+                    ELSE NULL
+                END as role_details
+            FROM users u
+            WHERE u.status != 'deleted'
+            ORDER BY u.created_at DESC
+        `;
+
+        console.log("All users fetched");
+        res.status(200).json({ 
+            success: true, 
+            data: users,
+            count: users.length
+        });
+    } catch (error) {
+        console.error("Error fetching all users:", error);
+        res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};

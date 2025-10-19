@@ -1,5 +1,5 @@
 import expres from "express";
-import { changeOfficerStatus, getAllOfficers, getOfficer, removeOfficer, removeHouse, getHouse, getHouses, removeAdmin, addAdmin, addBackHouse } from "../controllers/adminController.js";
+import { changeOfficerStatus, getAllOfficers, getOfficer, removeOfficer, removeHouse, getHouse, getHouses, removeAdmin, addAdmin, addBackHouse, getAllUsers } from "../controllers/adminController.js";
 
 const router = expres.Router();
 
@@ -13,6 +13,7 @@ router.get("/houses/:id", getHouse);
 router.get("/houses", getHouses);
 router.post("/administrators", addAdmin);
 router.delete("/administrators/:id", removeAdmin);
+router.get("/users", getAllUsers);
 
 
 export default router;

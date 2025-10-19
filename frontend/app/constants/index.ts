@@ -1,4 +1,5 @@
 import type { AxisModel } from "@syncfusion/ej2-react-charts";
+import { formatDate } from "~/lib/utils";
 
 export const sidebarItems = [
   {
@@ -146,3 +147,75 @@ export const RIGHT_CONFETTI = {
   angle: 135,
   origin: { x: 1, y: 1 },
 };
+export const users = [
+  {
+    id: 1,
+    name: "Reatile Setilo",
+    email: "ReaSet@gmail.com",
+    dateJoined: formatDate("2025-01-03"),
+    userType: "admin",
+  },
+  {
+    id: 2,
+    name: "Thabo Mosweu",
+    email: "thabo.mosweu@gmail.com",
+    dateJoined: formatDate("2025-01-15"),
+    userType: "user",
+  },
+  {
+    id: 3,
+    name: "Lerato Kgosi",
+    email: "lerato.kgosi@outlook.com",
+    dateJoined: formatDate("2025-02-08"),
+    userType: "moderator",
+  },
+  {
+    id: 4,
+    name: "Kagiso Molefe",
+    email: "k.molefe@yahoo.com",
+    dateJoined: formatDate("2024-12-20"),
+    userType: "user",
+  },
+  {
+    id: 5,
+    name: "Boitumelo Serame",
+    email: "boitumelo.s@gmail.com",
+    dateJoined: formatDate("2025-03-12"),
+    userType: "user",
+  },
+  {
+    id: 6,
+    name: "Neo Maphosa",
+    email: "neo.maphosa@mail.com",
+    dateJoined: formatDate("2024-11-05"),
+    userType: "admin",
+  },
+  {
+    id: 7,
+    name: "Kitso Ramatapa",
+    email: "kitso.r@gmail.com",
+    dateJoined: formatDate("2025-02-28"),
+    userType: "user",
+  },
+  {
+    id: 8,
+    name: "Tshepo Gaborone",
+    email: "tshepo.gabs@hotmail.com",
+    dateJoined: formatDate("2025-01-22"),
+    userType: "moderator",
+  },
+  {
+    id: 9,
+    name: "Kelebogile Modise",
+    email: "kele.modise@gmail.com",
+    dateJoined: formatDate("2024-10-18"),
+    userType: "user",
+  },
+  {
+    id: 10,
+    name: "Mpho Dintwe",
+    email: "mpho.dintwe@mail.com",
+    dateJoined: formatDate("2025-04-02"),
+    userType: "user",
+  },
+];
