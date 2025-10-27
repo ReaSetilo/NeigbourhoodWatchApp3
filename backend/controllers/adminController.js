@@ -1159,3 +1159,1273 @@ export const getAllUsers = async (req, res) => {
         res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
+export const getMembers = async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        last_login,
+        created_at,
+        updated_at
+      FROM users
+      WHERE user_type = 'neighborhood_member'
+      ORDER BY created_at DESC
+    `;
+
+    const [members] = await pool.query(query);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Members retrieved successfully',
+      data: members,
+      count: members.length
+    });
+
+  } catch (error) {
+    console.error('Error fetching members:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch members',
+      error: error.message
+    });
+  }
+};
+/**
+ * Add a new user (supports all user types: admin, security_officer, neighborhood_member)
+ * @route POST /api/admin/users
+ */
+export const addUser = async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      email,
+      phone_number,
+      password,
+      user_type,
+      status = 'pending_approval',
+      is_approved = false,
+      // Member-specific fields
+      house_number,
+      street_address,
+      subscription_status = 'active',
+      subscription_start_date,
+      // Officer-specific fields
+      employee_id,
+      // Admin-specific fields
+      can_modify_system_config = false
+    } = req.body;
+
+    // ============================================
+    // VALIDATION
+    // ============================================
+    
+    // Required fields validation
+    if (!first_name || !last_name || !email || !password || !user_type) {
+      return res.status(400).json({
+        success: false,
+        message: 'First name, last name, email, password, and user_type are required'
+      });
+    }
+
+    // Validate user_type
+    const validUserTypes = ['admin', 'security_officer', 'neighborhood_member'];
+    if (!validUserTypes.includes(user_type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user_type. Must be: admin, security_officer, or neighborhood_member'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Validate phone number if provided
+    if (phone_number) {
+      const phoneRegex = /^[0-9+\-\s()]+$/;
+      if (!phoneRegex.test(phone_number)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid phone number format'
+        });
+      }
+    }
+
+    // Validate status
+    const validStatuses = ['pending_approval', 'active', 'inactive', 'suspended', 'deleted'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status. Must be: pending_approval, active, inactive, suspended, or deleted'
+      });
+    }
+
+    // Validate password strength
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 8 characters long'
+      });
+    }
+
+    // ============================================
+    // CHECK FOR DUPLICATES
+    // ============================================
+    
+    const existingUser = await sql`
+      SELECT user_id, email 
+      FROM users 
+      WHERE email = ${email}
+    `;
+
+    if (existingUser.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Email already exists',
+        existingUserId: existingUser[0].user_id
+      });
+    }
+
+    // ============================================
+    // HASH PASSWORD
+    // ============================================
+    
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // ============================================
+    // INSERT NEW USER
+    // ============================================
+    
+    const newUser = await sql`
+      INSERT INTO users (
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        password_hash,
+        user_type,
+        status,
+        is_approved,
+        created_at,
+        updated_at
+      ) VALUES (
+        ${first_name},
+        ${last_name},
+        ${email},
+        ${phone_number || null},
+        ${hashedPassword},
+        ${user_type}::user_type_enum,
+        ${status}::user_status_enum,
+        ${is_approved},
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+      )
+      RETURNING 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        created_at,
+        updated_at
+    `;
+
+    const userId = newUser[0].user_id;
+
+    // ============================================
+    // CREATE RELATED RECORDS BASED ON USER TYPE
+    // ============================================
+    
+    if (user_type === 'security_officer') {
+      // Create security officer record
+      const generatedEmployeeId = employee_id || `SO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      
+      await sql`
+        INSERT INTO security_officers (
+          officer_id,
+          employee_id,
+          approved_by_admin_id,
+          is_permanently_deleted,
+          created_at,
+          updated_at
+        ) VALUES (
+          ${userId},
+          ${generatedEmployeeId},
+          ${req.user?.user_id || null},
+          false,
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP
+        )
+      `;
+
+      console.log(`✅ Security officer created with employee_id: ${generatedEmployeeId}`);
+    } 
+    else if (user_type === 'neighborhood_member') {
+      // Create neighborhood member record
+      await sql`
+        INSERT INTO neighborhood_members (
+          member_id,
+          house_number,
+          street_address,
+          subscription_status,
+          subscription_start_date,
+          approved_by_admin_id,
+          created_at,
+          updated_at
+        ) VALUES (
+          ${userId},
+          ${house_number || null},
+          ${street_address || null},
+          ${subscription_status || 'active'}::subscription_status_enum,
+          ${subscription_start_date || null},
+          ${req.user?.user_id || null},
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP
+        )
+      `;
+
+      console.log(`✅ Neighborhood member created`);
+    }
+    else if (user_type === 'admin') {
+      // Create administrator record
+      await sql`
+        INSERT INTO administrators (
+          admin_id,
+          created_by_admin_id,
+          can_modify_system_config,
+          created_at
+        ) VALUES (
+          ${userId},
+          ${req.user?.user_id || null},
+          ${can_modify_system_config},
+          CURRENT_TIMESTAMP
+        )
+      `;
+
+      console.log(`✅ Administrator created with can_modify_system_config: ${can_modify_system_config}`);
+    }
+
+    // ============================================
+    // SUCCESS RESPONSE
+    // ============================================
+    
+    console.log(`✅ User created: ${userId} - ${user_type}`);
+    
+    return res.status(201).json({
+      success: true,
+      message: `${getUserTypeLabel(user_type)} created successfully`,
+      data: newUser[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error adding user:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add user',
+      error: error.message
+    });
+  }
+};
+
+
+
+/**
+ * Helper function to get user-friendly label for user type
+ */
+function getUserTypeLabel(userType) {
+  const labels = {
+    'admin': 'Administrator',
+    'security_officer': 'Security Officer',
+    'neighborhood_member': 'Neighborhood Member'
+  };
+  return labels[userType] || 'User';
+}
+
+/**
+ * Get a single member by ID
+ * @route GET /api/members/:id
+ */
+export const getMember = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validate ID
+    if (!id || isNaN(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid member ID is required'
+      });
+    }
+
+    const query = `
+      SELECT 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        last_login,
+        created_at,
+        updated_at
+      FROM users
+      WHERE user_id = ? AND user_type = 'neighborhood_member'
+    `;
+
+    const [members] = await pool.query(query, [id]);
+
+    if (members.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Member not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Member retrieved successfully',
+      data: members[0]
+    });
+
+  } catch (error) {
+    console.error('Error fetching member:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch member',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Add a new member
+ * @route POST /api/members
+ */
+export const addMember = async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      email,
+      phone_number,
+      password,
+      status = 'active',
+      is_approved = false
+    } = req.body;
+
+    // Validation
+    if (!first_name || !last_name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'First name, last name, email, and password are required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // Validate phone number if provided
+    if (phone_number) {
+      const phoneRegex = /^[0-9+\-\s()]+$/;
+      if (!phoneRegex.test(phone_number)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid phone number format'
+        });
+      }
+    }
+
+    // Check if email already exists
+    const [existingUser] = await pool.query(
+      'SELECT user_id FROM users WHERE email = ?',
+      [email]
+    );
+
+    if (existingUser.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Email already exists'
+      });
+    }
+
+    // Hash password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Insert new member
+    const insertQuery = `
+      INSERT INTO users (
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        password_hash,
+        user_type,
+        status,
+        is_approved,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'neighborhood_member', ?, ?, NOW(), NOW())
+    `;
+
+    const [result] = await pool.query(insertQuery, [
+      first_name,
+      last_name,
+      email,
+      phone_number || null,
+      hashedPassword,
+      status,
+      is_approved
+    ]);
+
+    // Fetch the newly created member
+    const [newMember] = await pool.query(
+      `SELECT 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        created_at
+      FROM users
+      WHERE user_id = ?`,
+      [result.insertId]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Member created successfully',
+      data: newMember[0]
+    });
+
+  } catch (error) {
+    console.error('Error adding member:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add member',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Update a member
+ * @route PUT /api/members/:id
+ */
+export const updateMember = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      first_name,
+      last_name,
+      email,
+      phone_number,
+      status,
+      is_approved
+    } = req.body;
+
+    // Validate ID
+    if (!id || isNaN(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid member ID is required'
+      });
+    }
+
+    // Check if member exists
+    const [existingMember] = await pool.query(
+      'SELECT user_id FROM users WHERE user_id = ? AND user_type = ?',
+      [id, 'neighborhood_member']
+    );
+
+    if (existingMember.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Member not found'
+      });
+    }
+
+    // If email is being updated, check for duplicates
+    if (email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email format'
+        });
+      }
+
+      const [duplicateEmail] = await pool.query(
+        'SELECT user_id FROM users WHERE email = ? AND user_id != ?',
+        [email, id]
+      );
+
+      if (duplicateEmail.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'Email already exists'
+        });
+      }
+    }
+
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+
+    if (first_name !== undefined) {
+      updates.push('first_name = ?');
+      values.push(first_name);
+    }
+    if (last_name !== undefined) {
+      updates.push('last_name = ?');
+      values.push(last_name);
+    }
+    if (email !== undefined) {
+      updates.push('email = ?');
+      values.push(email);
+    }
+    if (phone_number !== undefined) {
+      updates.push('phone_number = ?');
+      values.push(phone_number);
+    }
+    if (status !== undefined) {
+      updates.push('status = ?');
+      values.push(status);
+    }
+    if (is_approved !== undefined) {
+      updates.push('is_approved = ?');
+      values.push(is_approved);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No fields to update'
+      });
+    }
+
+    updates.push('updated_at = NOW()');
+    values.push(id);
+
+    const updateQuery = `
+      UPDATE users 
+      SET ${updates.join(', ')}
+      WHERE user_id = ? AND user_type = 'neighborhood_member'
+    `;
+
+    await pool.query(updateQuery, values);
+
+    // Fetch updated member
+    const [updatedMember] = await pool.query(
+      `SELECT 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        last_login,
+        created_at,
+        updated_at
+      FROM users
+      WHERE user_id = ?`,
+      [id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Member updated successfully',
+      data: updatedMember[0]
+    });
+
+  } catch (error) {
+    console.error('Error updating member:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update member',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Delete a member (soft delete by setting status to 'deleted')
+ * @route DELETE /api/members/:id
+ */
+export const deleteMember = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validate ID
+    if (!id || isNaN(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid member ID is required'
+      });
+    }
+
+    // Check if member exists
+    const [existingMember] = await pool.query(
+      'SELECT user_id FROM users WHERE user_id = ? AND user_type = ?',
+      [id, 'neighborhood_member']
+    );
+
+    if (existingMember.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Member not found'
+      });
+    }
+
+    // Soft delete - update status to 'deleted'
+    await pool.query(
+      `UPDATE users 
+       SET status = 'deleted', updated_at = NOW() 
+       WHERE user_id = ? AND user_type = 'neighborhood_member'`,
+      [id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Member deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting member:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete member',
+      error: error.message
+    });
+  }
+};
+
+
+
+/**
+ * Approve a user (member or admin)
+ * @route PATCH /api/admin/users/:id/approve
+ */
+export const approveUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { approval_notes } = req.body;
+
+    // ============================================
+    // VALIDATION
+    // ============================================
+
+    // Validate ID format (UUID)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!id || !uuidRegex.test(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid user ID (UUID) is required'
+      });
+    }
+
+    // ============================================
+    // CHECK IF USER EXISTS
+    // ============================================
+
+    const user = await sql`
+      SELECT user_id, first_name, last_name, email, user_type, status, is_approved
+      FROM users
+      WHERE user_id = ${id}
+    `;
+
+    if (user.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const currentUser = user[0];
+
+    // Check if user is a security officer (should use the officer-specific endpoint)
+    if (currentUser.user_type === 'security_officer') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please use the security officer approval endpoint for officers'
+      });
+    }
+
+    // Check if already approved
+    if (currentUser.is_approved && currentUser.status === 'active') {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already approved and active'
+      });
+    }
+
+    // ============================================
+    // UPDATE USER APPROVAL STATUS
+    // ============================================
+
+    const updatedUser = await sql`
+      UPDATE users
+      SET 
+        is_approved = true,
+        status = 'active'::user_status_enum,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ${id}
+      RETURNING 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        updated_at
+    `;
+
+    // ============================================
+    // UPDATE RELATED TABLE (if neighborhood member)
+    // ============================================
+
+    if (currentUser.user_type === 'neighborhood_member') {
+      await sql`
+        UPDATE neighborhood_members
+        SET 
+          approved_by_admin_id = ${req.user?.user_id || null},
+          updated_at = CURRENT_TIMESTAMP
+        WHERE member_id = ${id}
+      `;
+    }
+
+    // ============================================
+    // SEND NOTIFICATION TO USER
+    // ============================================
+
+    const notificationMessage = `Your account has been approved! You can now access all features of the Neighborhood Watch system.`;
+
+    await sql`
+      INSERT INTO notifications (
+        user_id,
+        notification_type,
+        subject,
+        message,
+        related_entity_type,
+        related_entity_id,
+        created_at
+      ) VALUES (
+        ${id},
+        'email',
+        'Account Approved',
+        ${notificationMessage},
+        'user',
+        ${id},
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    // ============================================
+    // LOG THE ACTION
+    // ============================================
+
+    await sql`
+      INSERT INTO audit_logs (
+        user_id,
+        action_type,
+        entity_type,
+        entity_id,
+        old_value,
+        new_value,
+        created_at
+      ) VALUES (
+        ${req.user?.user_id || null},
+        'APPROVE_USER',
+        'user',
+        ${id},
+        ${JSON.stringify({ is_approved: currentUser.is_approved, status: currentUser.status })},
+        ${JSON.stringify({ is_approved: true, status: 'active', approval_notes: approval_notes || 'Approved by admin' })},
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    // ============================================
+    // SUCCESS RESPONSE
+    // ============================================
+
+    console.log(`✅ User approved: ${id}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'User approved successfully',
+      data: updatedUser[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error approving user:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to approve user',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Reject a user (member or admin)
+ * @route PATCH /api/admin/users/:id/reject
+ */
+export const rejectUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rejection_reason } = req.body;
+
+    // ============================================
+    // VALIDATION
+    // ============================================
+
+    // Validate ID format (UUID)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!id || !uuidRegex.test(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid user ID (UUID) is required'
+      });
+    }
+
+    // Validate rejection reason
+    if (!rejection_reason || !rejection_reason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required'
+      });
+    }
+
+    // ============================================
+    // CHECK IF USER EXISTS
+    // ============================================
+
+    const user = await sql`
+      SELECT user_id, first_name, last_name, email, user_type, status, is_approved
+      FROM users
+      WHERE user_id = ${id}
+    `;
+
+    if (user.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const currentUser = user[0];
+
+    // Check if user is a security officer (should use the officer-specific endpoint)
+    if (currentUser.user_type === 'security_officer') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please use the security officer rejection endpoint for officers'
+      });
+    }
+
+    // Check if already rejected
+    if (!currentUser.is_approved && currentUser.status === 'inactive') {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already rejected and inactive'
+      });
+    }
+
+    // ============================================
+    // UPDATE USER APPROVAL STATUS
+    // ============================================
+
+    const updatedUser = await sql`
+      UPDATE users
+      SET 
+        is_approved = false,
+        status = 'inactive'::user_status_enum,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ${id}
+      RETURNING 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        updated_at
+    `;
+
+    // ============================================
+    // UPDATE RELATED TABLE (if neighborhood member)
+    // ============================================
+
+    if (currentUser.user_type === 'neighborhood_member') {
+      await sql`
+        UPDATE neighborhood_members
+        SET 
+          approved_by_admin_id = ${req.user?.user_id || null},
+          updated_at = CURRENT_TIMESTAMP
+        WHERE member_id = ${id}
+      `;
+    }
+
+    // ============================================
+    // SEND NOTIFICATION TO USER
+    // ============================================
+
+    // CORRECT SCHEMA for notifications table:
+    // - notification_id: UUID PRIMARY KEY
+    // - user_id: UUID NOT NULL
+    // - notification_type: notification_type_enum NOT NULL
+    // - subject: VARCHAR(255)
+    // - message: TEXT NOT NULL
+    // - sent_at: TIMESTAMP
+    // - delivery_status: VARCHAR(50)
+    // - related_entity_type: VARCHAR(50)
+    // - related_entity_id: UUID
+    // - created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+    const notificationMessage = `Your account approval has been rejected. Reason: ${rejection_reason}. Please contact the administrator for more information.`;
+
+    await sql`
+      INSERT INTO notifications (
+        user_id,
+        notification_type,
+        subject,
+        message,
+        delivery_status,
+        related_entity_type,
+        related_entity_id,
+        created_at
+      ) VALUES (
+        ${id},
+        'email',
+        'Account Approval Rejected',
+        ${notificationMessage},
+        'pending',
+        'user',
+        ${id},
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    // ============================================
+    // LOG THE ACTION
+    // ============================================
+
+    // CORRECT SCHEMA for audit_logs table:
+    // - log_id: UUID PRIMARY KEY
+    // - user_id: UUID
+    // - action_type: VARCHAR(100) NOT NULL
+    // - entity_type: VARCHAR(100)
+    // - entity_id: UUID
+    // - old_value: JSONB
+    // - new_value: JSONB
+    // - ip_address: INET
+    // - created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+    await sql`
+      INSERT INTO audit_logs (
+        user_id,
+        action_type,
+        entity_type,
+        entity_id,
+        old_value,
+        new_value,
+        created_at
+      ) VALUES (
+        ${req.user?.user_id || null},
+        'REJECT_USER',
+        'user',
+        ${id},
+        ${JSON.stringify({ 
+          is_approved: currentUser.is_approved, 
+          status: currentUser.status 
+        })},
+        ${JSON.stringify({ 
+          is_approved: false, 
+          status: 'inactive', 
+          rejection_reason 
+        })},
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    // ============================================
+    // SUCCESS RESPONSE
+    // ============================================
+
+    console.log(`✅ User rejected: ${id} - Reason: ${rejection_reason}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'User rejected successfully',
+      data: updatedUser[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error rejecting user:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to reject user',
+      error: error.message
+    });
+  }
+};
+
+
+/**
+ * Approve or reject a security officer
+ * @route PATCH /api/admin/officers/:id/approve
+ */
+export const approveOfficer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_approved, employee_id, approval_notes } = req.body;
+
+    // ============================================
+    // VALIDATION
+    // ============================================
+
+    // Validate ID format (UUID)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!id || !uuidRegex.test(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid officer ID (UUID) is required'
+      });
+    }
+
+    // Validate is_approved
+    if (typeof is_approved !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'is_approved must be a boolean value (true or false)'
+      });
+    }
+
+    // ============================================
+    // CHECK IF OFFICER EXISTS
+    // ============================================
+
+    const officer = await sql`
+      SELECT 
+        u.user_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.user_type,
+        u.status,
+        u.is_approved,
+        so.employee_id,
+        so.is_permanently_deleted
+      FROM users u
+      JOIN security_officers so ON u.user_id = so.officer_id
+      WHERE u.user_id = ${id} AND so.is_permanently_deleted = false
+    `;
+
+    if (officer.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Security officer not found'
+      });
+    }
+
+    const currentOfficer = officer[0];
+
+    // Verify it's actually a security officer
+    if (currentOfficer.user_type !== 'security_officer') {
+      return res.status(400).json({
+        success: false,
+        message: 'This user is not a security officer'
+      });
+    }
+
+    // ============================================
+    // UPDATE USER APPROVAL STATUS
+    // ============================================
+
+    const updatedUser = await sql`
+      UPDATE users
+      SET 
+        is_approved = ${is_approved},
+        status = ${is_approved ? 'active' : 'inactive'}::user_status_enum,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ${id}
+      RETURNING 
+        user_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
+        user_type,
+        status,
+        is_approved,
+        updated_at
+    `;
+
+    // ============================================
+    // UPDATE SECURITY OFFICER TABLE
+    // ============================================
+
+    // Update employee_id if provided during approval
+    const newEmployeeId = employee_id || currentOfficer.employee_id;
+
+    await sql`
+      UPDATE security_officers
+      SET 
+        approved_by_admin_id = ${req.user?.user_id || null},
+        employee_id = ${newEmployeeId},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE officer_id = ${id}
+    `;
+
+    // ============================================
+    // SEND NOTIFICATION TO OFFICER
+    // ============================================
+
+    const notificationMessage = is_approved 
+      ? `Your security officer account has been approved! Your employee ID is: ${newEmployeeId}. You can now start your duties.`
+      : `Your security officer application has been rejected. ${approval_notes || 'Please contact the administrator for more information.'}`;
+
+    await sql`
+      INSERT INTO notifications (
+        user_id,
+        notification_type,
+        subject,
+        message,
+        related_entity_type,
+        related_entity_id,
+        created_at
+      ) VALUES (
+        ${id},
+        'email',
+        ${is_approved ? 'Security Officer Approved' : 'Application Rejected'},
+        ${notificationMessage},
+        'security_officer',
+        ${id},
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    // ============================================
+    // NOTIFY ALL ACTIVE MEMBERS (if approved)
+    // ============================================
+
+    if (is_approved) {
+      await sql`
+        INSERT INTO notifications (
+          user_id,
+          notification_type,
+          subject,
+          message,
+          related_entity_type,
+          related_entity_id,
+          created_at
+        )
+        SELECT 
+          nm.member_id,
+          'email',
+          'New Security Officer',
+          ${`A new security officer ${currentOfficer.first_name} ${currentOfficer.last_name} (ID: ${newEmployeeId}) has been approved and is now on duty.`},
+          'security_officer',
+          ${id},
+          CURRENT_TIMESTAMP
+        FROM neighborhood_members nm
+        JOIN users u ON nm.member_id = u.user_id
+        WHERE u.status = 'active' AND u.is_approved = true
+      `;
+
+      console.log(`✅ Sent notifications to all active members about new officer`);
+    }
+
+    // ============================================
+    // LOG THE ACTION
+    // ============================================
+
+    await sql`
+      INSERT INTO audit_logs (
+        user_id,
+        action_type,
+        entity_type,
+        entity_id,
+        old_value,
+        new_value,
+        created_at
+      ) VALUES (
+        ${req.user?.user_id || null},
+        ${is_approved ? 'APPROVE_OFFICER' : 'REJECT_OFFICER'},
+        'security_officer',
+        ${id},
+        ${JSON.stringify({ 
+          is_approved: currentOfficer.is_approved, 
+          status: currentOfficer.status,
+          employee_id: currentOfficer.employee_id
+        })},
+        ${JSON.stringify({ 
+          is_approved, 
+          status: is_approved ? 'active' : 'inactive',
+          employee_id: newEmployeeId,
+          approval_notes 
+        })},
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    // ============================================
+    // SUCCESS RESPONSE
+    // ============================================
+
+    console.log(`✅ Security officer ${is_approved ? 'approved' : 'rejected'}: ${id}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Security officer ${is_approved ? 'approved' : 'rejected'} successfully`,
+      data: {
+        ...updatedUser[0],
+        employee_id: newEmployeeId
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error approving security officer:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to approve security officer',
+      error: error.message
+    });
+  }
+};
+
+export default { approveUser, approveOfficer };

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Header from 'components/Header';
 import * as Grids from '@syncfusion/ej2-react-grids';
 
-const AllUsers = () => {
+const Administrators = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +25,9 @@ const AllUsers = () => {
         const data = await response.json();
         
         if (data.success) {
-          setUsers(data.data);
+          // Filter only administrators
+          const administrators = data.data.filter((user: any) => user.user_type === 'admin');
+          setUsers(administrators);
         } else {
           throw new Error(data.message || 'Failed to fetch users');
         }
@@ -55,22 +57,6 @@ const AllUsers = () => {
     );
   };
 
-  const userTypeTemplate = (props: any) => {
-    const typeColors: Record<string, string> = {
-      admin: 'bg-pink-50 text-pink-500',
-      security_officer: 'bg-primary-50 text-primary-500',
-      neighborhood_member: 'bg-navy-50 text-navy-500'
-    };
-
-    const displayName = props.user_type?.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase());
-
-    return (
-      <span className={`px-2 py-1 rounded-full text-xs font-medium ${typeColors[props.user_type] || 'bg-gray-200 text-gray-700'}`}>
-        {displayName}
-      </span>
-    );
-  };
-
   const approvedTemplate = (props: any) => {
     return (
       <div className="flex-center">
@@ -87,11 +73,11 @@ const AllUsers = () => {
     return (
       <main className='dashboard wrapper'>
         <Header
-          title="Users Management"
-          description="View and manage all users in the system"
+          title="Administrators"
+          description="View and manage administrator accounts"
         />
         <div className="flex-center p-8">
-          <p className="p-18-regular text-gray-500">Loading users...</p>
+          <p className="p-18-regular text-gray-500">Loading administrators...</p>
         </div>
       </main>
     );
@@ -101,8 +87,8 @@ const AllUsers = () => {
     return (
       <main className='dashboard wrapper'>
         <Header
-          title="Users Management"
-          description="View and manage all users in the system"
+          title="Administrators"
+          description="View and manage administrator accounts"
         />
         <div className="error p-4">
           <p>Error: {error}</p>
@@ -112,15 +98,15 @@ const AllUsers = () => {
   }
 
   return (
-    <main className='all-userd wrapper'>
+    <main className='administrators wrapper'>
       <Header
-        title="Users Management"
-        description="View and manage all users in the system"
+        title="Administrators"
+        description="View and manage administrator accounts"
       />
       
       <div className="container">
         <div className="flex-between mb-6">
-          <h1 className="p-24-semibold text-dark-100">All Users</h1>
+          <h1 className="p-24-semibold text-dark-100">Administrators</h1>
           <p className="p-16-semibold text-gray-500">Total: {users.length}</p>
         </div>
 
@@ -164,12 +150,6 @@ const AllUsers = () => {
                 width='140'
               />
               <Grids.ColumnDirective 
-                field='user_type' 
-                headerText='User Type' 
-                width='160'
-                template={userTypeTemplate}
-              />
-              <Grids.ColumnDirective 
                 field='status' 
                 headerText='Status' 
                 width='130'
@@ -205,4 +185,4 @@ const AllUsers = () => {
   );
 };
 
-export default AllUsers;
+export default Administrators;
