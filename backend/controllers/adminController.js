@@ -1,34 +1,60 @@
-import { sql } from "../config/db.js";
+import { supabase } from "../config/db.js";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
+import nodemailer from "nodemailer";
+
 /** OFFICER ROUTES */
 
 //get all officers
 export const getAllOfficers = async (req, res) => {
    try {
-        const officers = await sql`
-            SELECT 
-                so.officer_id,
-                so.employee_id,
-                so.suspension_start_date,
-                so.suspension_end_date,
-                so.suspension_reason,
-                so.is_permanently_deleted,
-                so.created_at,
-                so.updated_at,
-                u.email,
-                u.phone_number,
-                u.first_name,
-                u.last_name,
-                u.status,
-                u.is_approved,
-                u.last_login
-            FROM security_officers so
-            JOIN users u ON so.officer_id = u.user_id
-            WHERE so.is_permanently_deleted = false
-            ORDER BY so.created_at DESC
-        `;
+        const { data: officers, error } = await supabase
+            .from('security_officers')
+            .select(`
+                officer_id,
+                employee_id,
+                suspension_start_date,
+                suspension_end_date,
+                suspension_reason,
+                is_permanently_deleted,
+                created_at,
+                updated_at,
+                users!inner (
+                    email,
+                    phone_number,
+                    first_name,
+                    last_name,
+                    status,
+                    is_approved,
+                    last_login
+                )
+            `)
+            .eq('is_permanently_deleted', false)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        // Flatten the nested users object
+        const flattenedOfficers = officers.map(officer => ({
+            officer_id: officer.officer_id,
+            employee_id: officer.employee_id,
+            suspension_start_date: officer.suspension_start_date,
+            suspension_end_date: officer.suspension_end_date,
+            suspension_reason: officer.suspension_reason,
+            is_permanently_deleted: officer.is_permanently_deleted,
+            created_at: officer.created_at,
+            updated_at: officer.updated_at,
+            email: officer.users.email,
+            phone_number: officer.users.phone_number,
+            first_name: officer.users.first_name,
+            last_name: officer.users.last_name,
+            status: officer.users.status,
+            is_approved: officer.users.is_approved,
+            last_login: officer.users.last_login
+        }));
+
         console.log("officers fetched");
-        res.status(200).json({ success: true, data: officers });
+        res.status(200).json({ success: true, data: flattenedOfficers });
     } catch (error) {
         console.error("Error fetching officers:", error);
         res.status(500).json({ success: false, message: "Internal server error" });
@@ -51,14 +77,20 @@ export const changeOfficerStatus = async (req, res) => {
         }
 
         // Check if officer exists
-        const officer = await sql`
-            SELECT so.officer_id, u.first_name, u.last_name 
-            FROM security_officers so
-            JOIN users u ON so.officer_id = u.user_id
-            WHERE so.officer_id = ${id} AND so.is_permanently_deleted = false
-        `;
+        const { data: officer, error: officerError } = await supabase
+            .from('security_officers')
+            .select(`
+                officer_id,
+                users!inner (
+                    first_name,
+                    last_name
+                )
+            `)
+            .eq('officer_id', id)
+            .eq('is_permanently_deleted', false)
+            .single();
 
-        if (officer.length === 0) {
+        if (officerError || !officer) {
             return res.status(404).json({ 
                 success: false, 
                 message: "Officer not found" 
@@ -81,61 +113,53 @@ export const changeOfficerStatus = async (req, res) => {
             suspension_end.setDate(suspension_end.getDate() + days);
 
             // Update security officer
-            await sql`
-                UPDATE security_officers 
-                SET 
-                    suspension_start_date = ${suspension_start},
-                    suspension_end_date = ${suspension_end},
-                    suspension_reason = ${suspension_reason}
-                WHERE officer_id = ${id}
-            `;
+            const { error: updateOfficerError } = await supabase
+                .from('security_officers')
+                .update({
+                    suspension_start_date: suspension_start.toISOString(),
+                    suspension_end_date: suspension_end.toISOString(),
+                    suspension_reason: suspension_reason
+                })
+                .eq('officer_id', id);
+
+            if (updateOfficerError) throw updateOfficerError;
 
             // Update user status
-            await sql`
-                UPDATE users 
-                SET status = 'suspended'
-                WHERE user_id = ${id}
-            `;
+            const { error: updateUserError } = await supabase
+                .from('users')
+                .update({ status: 'suspended' })
+                .eq('user_id', id);
 
-            // Send notifications to all active members
-            await sql`
-                INSERT INTO notifications (
-                    user_id, 
-                    notification_type, 
-                    subject, 
-                    message,
-                    related_entity_type,
-                    related_entity_id
-                )
-                SELECT 
-                    nm.member_id,
-                    'email',
-                    'Security Officer Suspended',
-                    ${`Security officer ${officer[0].first_name} ${officer[0].last_name} has been suspended. Reason: ${suspension_reason}`},
-                    'security_officer',
-                    ${id}
-                FROM neighborhood_members nm
-                JOIN subscriptions s ON nm.member_id = s.member_id
-                WHERE s.status = 'active'
-            `;
+            if (updateUserError) throw updateUserError;
+
+            // Get all active members for notifications
+            const { data: activeMembers, error: membersError } = await supabase
+                .from('neighborhood_members')
+                .select('member_id')
+                .eq('subscription_status', 'active');
+
+            if (!membersError && activeMembers) {
+                // Send notifications to all active members
+                const notifications = activeMembers.map(member => ({
+                    user_id: member.member_id,
+                    notification_type: 'email',
+                    subject: 'Security Officer Suspended',
+                    message: `Security officer ${officer.users.first_name} ${officer.users.last_name} has been suspended. Reason: ${suspension_reason}`,
+                    related_entity_type: 'security_officer',
+                    related_entity_id: id
+                }));
+
+                await supabase.from('notifications').insert(notifications);
+            }
 
             // Log the action
-            await sql`
-                INSERT INTO audit_logs (
-                    user_id,
-                    action_type,
-                    entity_type,
-                    entity_id,
-                    new_value
-                )
-                VALUES (
-                    ${req.user?.user_id || null},
-                    'SUSPEND_OFFICER',
-                    'security_officer',
-                    ${id},
-                    ${JSON.stringify({ suspension_reason, suspension_start, suspension_end })}
-                )
-            `;
+            await supabase.from('audit_logs').insert({
+                user_id: req.user?.user_id || null,
+                action_type: 'SUSPEND_OFFICER',
+                entity_type: 'security_officer',
+                entity_id: id,
+                new_value: JSON.stringify({ suspension_reason, suspension_start, suspension_end })
+            });
 
             console.log(`Officer ${id} suspended`);
             res.status(200).json({ 
@@ -146,59 +170,52 @@ export const changeOfficerStatus = async (req, res) => {
 
         } else if (action === 'activate') {
             // Clear suspension
-            await sql`
-                UPDATE security_officers 
-                SET 
-                    suspension_start_date = NULL,
-                    suspension_end_date = NULL,
-                    suspension_reason = NULL
-                WHERE officer_id = ${id}
-            `;
+            const { error: clearSuspensionError } = await supabase
+                .from('security_officers')
+                .update({
+                    suspension_start_date: null,
+                    suspension_end_date: null,
+                    suspension_reason: null
+                })
+                .eq('officer_id', id);
+
+            if (clearSuspensionError) throw clearSuspensionError;
 
             // Update user status
-            await sql`
-                UPDATE users 
-                SET status = 'active'
-                WHERE user_id = ${id}
-            `;
+            const { error: activateUserError } = await supabase
+                .from('users')
+                .update({ status: 'active' })
+                .eq('user_id', id);
 
-            // Send notifications to members
-            await sql`
-                INSERT INTO notifications (
-                    user_id, 
-                    notification_type, 
-                    subject, 
-                    message,
-                    related_entity_type,
-                    related_entity_id
-                )
-                SELECT 
-                    nm.member_id,
-                    'email',
-                    'Security Officer Reactivated',
-                    ${`Security officer ${officer[0].first_name} ${officer[0].last_name} has been reactivated and is back on duty.`},
-                    'security_officer',
-                    ${id}
-                FROM neighborhood_members nm
-                JOIN subscriptions s ON nm.member_id = s.member_id
-                WHERE s.status = 'active'
-            `;
+            if (activateUserError) throw activateUserError;
+
+            // Get all active members for notifications
+            const { data: activeMembers, error: membersError } = await supabase
+                .from('neighborhood_members')
+                .select('member_id')
+                .eq('subscription_status', 'active');
+
+            if (!membersError && activeMembers) {
+                // Send notifications to members
+                const notifications = activeMembers.map(member => ({
+                    user_id: member.member_id,
+                    notification_type: 'email',
+                    subject: 'Security Officer Reactivated',
+                    message: `Security officer ${officer.users.first_name} ${officer.users.last_name} has been reactivated and is back on duty.`,
+                    related_entity_type: 'security_officer',
+                    related_entity_id: id
+                }));
+
+                await supabase.from('notifications').insert(notifications);
+            }
 
             // Log the action
-            await sql`
-                INSERT INTO audit_logs (
-                    user_id,
-                    action_type,
-                    entity_type,
-                    entity_id
-                )
-                VALUES (
-                    ${req.user?.user_id || null},
-                    'ACTIVATE_OFFICER',
-                    'security_officer',
-                    ${id}
-                )
-            `;
+            await supabase.from('audit_logs').insert({
+                user_id: req.user?.user_id || null,
+                action_type: 'ACTIVATE_OFFICER',
+                entity_type: 'security_officer',
+                entity_id: id
+            });
 
             console.log(`Officer ${id} reactivated`);
             res.status(200).json({ 
@@ -217,31 +234,34 @@ export const getOfficer = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const officer = await sql`
-            SELECT 
-                so.officer_id,
-                so.employee_id,
-                so.suspension_start_date,
-                so.suspension_end_date,
-                so.suspension_reason,
-                so.is_permanently_deleted,
-                so.approved_by_admin_id,
-                so.created_at,
-                so.updated_at,
-                u.email,
-                u.phone_number,
-                u.first_name,
-                u.last_name,
-                u.status,
-                u.is_approved,
-                u.last_login,
-                u.created_at as user_created_at
-            FROM security_officers so
-            JOIN users u ON so.officer_id = u.user_id
-            WHERE so.officer_id = ${id} AND so.is_permanently_deleted = false
-        `;
+        const { data: officer, error: officerError } = await supabase
+            .from('security_officers')
+            .select(`
+                officer_id,
+                employee_id,
+                suspension_start_date,
+                suspension_end_date,
+                suspension_reason,
+                is_permanently_deleted,
+                approved_by_admin_id,
+                created_at,
+                updated_at,
+                users!inner (
+                    email,
+                    phone_number,
+                    first_name,
+                    last_name,
+                    status,
+                    is_approved,
+                    last_login,
+                    created_at
+                )
+            `)
+            .eq('officer_id', id)
+            .eq('is_permanently_deleted', false)
+            .single();
 
-        if (officer.length === 0) {
+        if (officerError || !officer) {
             return res.status(404).json({ 
                 success: false, 
                 message: "Officer not found" 
@@ -249,52 +269,73 @@ export const getOfficer = async (req, res) => {
         }
 
         // Get patrol statistics
-        const patrolStats = await sql`
-            SELECT 
-                COUNT(*) as total_scans,
-                COUNT(DISTINCT qr_code_id) as unique_locations,
-                MAX(scan_timestamp) as last_patrol,
-                MIN(scan_timestamp) as first_patrol
-            FROM patrol_scans
-            WHERE officer_id = ${id}
-        `;
+        const { data: patrolStats, error: statsError } = await supabase
+            .rpc('get_patrol_stats', { officer_id_param: id });
+
+        // If RPC doesn't exist, use regular queries
+        let stats = { total_scans: 0, unique_locations: 0, last_patrol: null, first_patrol: null };
+        if (!statsError && patrolStats) {
+            stats = patrolStats;
+        } else {
+            const { count } = await supabase
+                .from('patrol_scans')
+                .select('*', { count: 'exact', head: true })
+                .eq('officer_id', id);
+            stats.total_scans = count || 0;
+        }
 
         // Get recent patrols (last 10)
-        const recentPatrols = await sql`
-            SELECT 
-                ps.scan_id,
-                ps.scan_timestamp,
-                ps.comments,
-                qr.gate_name,
-                qr.location_description
-            FROM patrol_scans ps
-            JOIN qr_codes qr ON ps.qr_code_id = qr.qr_code_id
-            WHERE ps.officer_id = ${id}
-            ORDER BY ps.scan_timestamp DESC
-            LIMIT 10
-        `;
+        const { data: recentPatrols } = await supabase
+            .from('patrol_scans')
+            .select(`
+                scan_id,
+                scan_timestamp,
+                comments,
+                qr_codes!inner (
+                    gate_name,
+                    location_description
+                )
+            `)
+            .eq('officer_id', id)
+            .order('scan_timestamp', { ascending: false })
+            .limit(10);
 
         // Get anomalies for this officer
-        const anomalies = await sql`
-            SELECT 
-                anomaly_id,
-                anomaly_type,
-                detection_date,
-                status,
-                notes
-            FROM patrol_anomalies
-            WHERE officer_id = ${id}
-            ORDER BY detection_date DESC
-            LIMIT 5
-        `;
+        const { data: anomalies } = await supabase
+            .from('patrol_anomalies')
+            .select('anomaly_id, anomaly_type, detection_date, status, notes')
+            .eq('officer_id', id)
+            .order('detection_date', { ascending: false })
+            .limit(5);
+
+        // Flatten the officer data
+        const flattenedOfficer = {
+            officer_id: officer.officer_id,
+            employee_id: officer.employee_id,
+            suspension_start_date: officer.suspension_start_date,
+            suspension_end_date: officer.suspension_end_date,
+            suspension_reason: officer.suspension_reason,
+            is_permanently_deleted: officer.is_permanently_deleted,
+            approved_by_admin_id: officer.approved_by_admin_id,
+            created_at: officer.created_at,
+            updated_at: officer.updated_at,
+            email: officer.users.email,
+            phone_number: officer.users.phone_number,
+            first_name: officer.users.first_name,
+            last_name: officer.users.last_name,
+            status: officer.users.status,
+            is_approved: officer.users.is_approved,
+            last_login: officer.users.last_login,
+            user_created_at: officer.users.created_at
+        };
 
         res.status(200).json({ 
             success: true, 
             data: {
-                ...officer[0],
-                patrol_stats: patrolStats[0],
-                recent_patrols: recentPatrols,
-                anomalies: anomalies
+                ...flattenedOfficer,
+                patrol_stats: stats,
+                recent_patrols: recentPatrols || [],
+                anomalies: anomalies || []
             }
         });
     } catch (error) {
@@ -309,14 +350,20 @@ export const removeOfficer = async (req, res) => {
         const { id } = req.params;
 
         // Check if officer exists
-        const officer = await sql`
-            SELECT so.officer_id, u.first_name, u.last_name 
-            FROM security_officers so
-            JOIN users u ON so.officer_id = u.user_id
-            WHERE so.officer_id = ${id} AND so.is_permanently_deleted = false
-        `;
+        const { data: officer, error: findError } = await supabase
+            .from('security_officers')
+            .select(`
+                officer_id,
+                users!inner (
+                    first_name,
+                    last_name
+                )
+            `)
+            .eq('officer_id', id)
+            .eq('is_permanently_deleted', false)
+            .single();
 
-        if (officer.length === 0) {
+        if (findError || !officer) {
             return res.status(404).json({ 
                 success: false, 
                 message: "Officer not found" 
@@ -324,57 +371,48 @@ export const removeOfficer = async (req, res) => {
         }
 
         // Soft delete the officer
-        await sql`
-            UPDATE security_officers 
-            SET is_permanently_deleted = true
-            WHERE officer_id = ${id}
-        `;
+        const { error: deleteOfficerError } = await supabase
+            .from('security_officers')
+            .update({ is_permanently_deleted: true })
+            .eq('officer_id', id);
 
-        await sql`
-            UPDATE users 
-            SET status = 'deleted'
-            WHERE user_id = ${id}
-        `;
+        if (deleteOfficerError) throw deleteOfficerError;
 
-        // Notify members
-        await sql`
-            INSERT INTO notifications (
-                user_id, 
-                notification_type, 
-                subject, 
-                message,
-                related_entity_type,
-                related_entity_id
-            )
-            SELECT 
-                nm.member_id,
-                'email',
-                'Security Officer Removed',
-                ${`Security officer ${officer[0].first_name} ${officer[0].last_name} has been permanently removed from the system.`},
-                'security_officer',
-                ${id}
-            FROM neighborhood_members nm
-            JOIN subscriptions s ON nm.member_id = s.member_id
-            WHERE s.status = 'active'
-        `;
+        const { error: deleteUserError } = await supabase
+            .from('users')
+            .update({ status: 'deleted' })
+            .eq('user_id', id);
+
+        if (deleteUserError) throw deleteUserError;
+
+        // Get all active members
+        const { data: activeMembers } = await supabase
+            .from('neighborhood_members')
+            .select('member_id')
+            .eq('subscription_status', 'active');
+
+        if (activeMembers) {
+            // Notify members
+            const notifications = activeMembers.map(member => ({
+                user_id: member.member_id,
+                notification_type: 'email',
+                subject: 'Security Officer Removed',
+                message: `Security officer ${officer.users.first_name} ${officer.users.last_name} has been permanently removed from the system.`,
+                related_entity_type: 'security_officer',
+                related_entity_id: id
+            }));
+
+            await supabase.from('notifications').insert(notifications);
+        }
 
         // Create audit log
-        await sql`
-            INSERT INTO audit_logs (
-                user_id,
-                action_type,
-                entity_type,
-                entity_id,
-                ip_address
-            )
-            VALUES (
-                ${req.user?.user_id || null},
-                'DELETE_OFFICER',
-                'security_officer',
-                ${id},
-                ${req.ip || null}
-            )
-        `;
+        await supabase.from('audit_logs').insert({
+            user_id: req.user?.user_id || null,
+            action_type: 'DELETE_OFFICER',
+            entity_type: 'security_officer',
+            entity_id: id,
+            ip_address: req.ip || null
+        });
 
         console.log(`Officer ${id} removed successfully`);
         res.status(200).json({ 
@@ -392,31 +430,38 @@ export const removeOfficer = async (req, res) => {
 //get all houses
 export const getHouses = async (req, res) => {
     try {
-        const houses = await sql`
-            SELECT 
-                h.house_id,
-                h.house_number,
-                h.street_address,
-                h.status,
-                h.created_at,
-                h.updated_at,
-                qr.qr_code_value,
-                qr.gate_name,
-                qr.is_active as qr_active,
-                u.first_name as member_first_name,
-                u.last_name as member_last_name,
-                u.email as member_email,
-                u.phone_number as member_phone,
-                nm.subscription_status,
-                s.missed_payments_count
-            FROM houses h
-            LEFT JOIN qr_codes qr ON h.qr_code_id = qr.qr_code_id
-            LEFT JOIN neighborhood_members nm ON h.member_id = nm.member_id
-            LEFT JOIN users u ON nm.member_id = u.user_id
-            LEFT JOIN subscriptions s ON nm.member_id = s.member_id AND s.status != 'cancelled'
-            WHERE h.status != 'deleted'
-            ORDER BY h.created_at DESC
-        `;
+        const { data: houses, error } = await supabase
+            .from('houses')
+            .select(`
+                house_id,
+                house_number,
+                street_address,
+                status,
+                created_at,
+                updated_at,
+                qr_codes (
+                    qr_code_value,
+                    gate_name,
+                    is_active
+                ),
+                neighborhood_members (
+                    member_id,
+                    subscription_status,
+                    users!inner (
+                        first_name,
+                        last_name,
+                        email,
+                        phone_number
+                    ),
+                    subscriptions (
+                        missed_payments_count
+                    )
+                )
+            `)
+            .neq('status', 'deleted')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
 
         console.log("Houses fetched");
         res.status(200).json({ 
@@ -436,22 +481,26 @@ export const removeHouse = async (req, res) => {
         const { reason } = req.body;
 
         // Check if house exists
-        const house = await sql`
-            SELECT 
-                h.house_id, 
-                h.house_number, 
-                h.street_address,
-                h.member_id,
-                u.first_name,
-                u.last_name,
-                u.email
-            FROM houses h
-            LEFT JOIN neighborhood_members nm ON h.member_id = nm.member_id
-            LEFT JOIN users u ON nm.member_id = u.user_id
-            WHERE h.house_id = ${id} AND h.status != 'deleted'
-        `;
+        const { data: house, error: findError } = await supabase
+            .from('houses')
+            .select(`
+                house_id,
+                house_number,
+                street_address,
+                member_id,
+                neighborhood_members (
+                    users!inner (
+                        first_name,
+                        last_name,
+                        email
+                    )
+                )
+            `)
+            .eq('house_id', id)
+            .neq('status', 'deleted')
+            .single();
 
-        if (house.length === 0) {
+        if (findError || !house) {
             return res.status(404).json({ 
                 success: false, 
                 message: "House not found" 
@@ -459,88 +508,66 @@ export const removeHouse = async (req, res) => {
         }
 
         // Update house status to suspended
-        await sql`
-            UPDATE houses 
-            SET status = 'suspended'
-            WHERE house_id = ${id}
-        `;
+        const { error: updateHouseError } = await supabase
+            .from('houses')
+            .update({ status: 'suspended' })
+            .eq('house_id', id);
+
+        if (updateHouseError) throw updateHouseError;
 
         // If there's a member, update their subscription status
-        if (house[0].member_id) {
-            await sql`
-                UPDATE neighborhood_members
-                SET subscription_status = 'suspended'
-                WHERE member_id = ${house[0].member_id}
-            `;
+        if (house.member_id) {
+            await supabase
+                .from('neighborhood_members')
+                .update({ subscription_status: 'suspended' })
+                .eq('member_id', house.member_id);
 
-            await sql`
-                UPDATE subscriptions
-                SET status = 'suspended'
-                WHERE member_id = ${house[0].member_id} AND status = 'active'
-            `;
+            await supabase
+                .from('subscriptions')
+                .update({ status: 'suspended' })
+                .eq('member_id', house.member_id)
+                .eq('status', 'active');
 
             // Send notification to the member
-            await sql`
-                INSERT INTO notifications (
-                    user_id, 
-                    notification_type, 
-                    subject, 
-                    message,
-                    related_entity_type,
-                    related_entity_id
-                )
-                VALUES (
-                    ${house[0].member_id},
-                    'email',
-                    'House Removed from Monitoring',
-                    ${reason || `Your house at ${house[0].house_number} ${house[0].street_address} has been removed from security monitoring due to missed payments. Please contact administration.`},
-                    'house',
-                    ${id}
-                )
-            `;
+            await supabase.from('notifications').insert({
+                user_id: house.member_id,
+                notification_type: 'email',
+                subject: 'House Removed from Monitoring',
+                message: reason || `Your house at ${house.house_number} ${house.street_address} has been removed from security monitoring due to missed payments. Please contact administration.`,
+                related_entity_type: 'house',
+                related_entity_id: id
+            });
         }
 
-        // Notify security officers
-        await sql`
-            INSERT INTO notifications (
-                user_id, 
-                notification_type, 
-                subject, 
-                message,
-                related_entity_type,
-                related_entity_id
-            )
-            SELECT 
-                so.officer_id,
-                'push',
-                'House Removed from Patrol',
-                ${`House at ${house[0].house_number} ${house[0].street_address} has been removed from patrol monitoring.`},
-                'house',
-                ${id}
-            FROM security_officers so
-            JOIN users u ON so.officer_id = u.user_id
-            WHERE u.status = 'active' AND so.is_permanently_deleted = false
-        `;
+        // Get all active security officers
+        const { data: officers } = await supabase
+            .from('security_officers')
+            .select('officer_id')
+            .eq('is_permanently_deleted', false);
+
+        if (officers) {
+            // Notify security officers
+            const notifications = officers.map(officer => ({
+                user_id: officer.officer_id,
+                notification_type: 'push',
+                subject: 'House Removed from Patrol',
+                message: `House at ${house.house_number} ${house.street_address} has been removed from patrol monitoring.`,
+                related_entity_type: 'house',
+                related_entity_id: id
+            }));
+
+            await supabase.from('notifications').insert(notifications);
+        }
 
         // Create audit log
-        await sql`
-            INSERT INTO audit_logs (
-                user_id,
-                action_type,
-                entity_type,
-                entity_id,
-                old_value,
-                new_value
-            )
-            VALUES (
-                ${req.user?.user_id || null},
-                'REMOVE_HOUSE',
-                'house',
-                ${id},
-                ${JSON.stringify({ status: 'active' })},
-                ${JSON.stringify({ status: 'suspended', reason })}
-            )
-        `;
+        await supabase.from('audit_logs').insert({
+            user_id: req.user?.user_id || null,
+            action_type: 'REMOVE_HOUSE',
+            entity_type: 'house',
+            entity_id: id,
+            old_value: JSON.stringify({ status: 'active' }),
+            new_value: JSON.stringify({ status: 'suspended', reason })
+        });
 
         console.log(`House ${id} removed from monitoring`);
         res.status(200).json({ 
@@ -558,39 +585,44 @@ export const getHouse = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const house = await sql`
-            SELECT 
-                h.house_id,
-                h.house_number,
-                h.street_address,
-                h.status,
-                h.created_at,
-                h.updated_at,
-                qr.qr_code_id,
-                qr.qr_code_value,
-                qr.gate_name,
-                qr.location_description,
-                qr.is_active as qr_active,
-                nm.member_id,
-                u.first_name as member_first_name,
-                u.last_name as member_last_name,
-                u.email as member_email,
-                u.phone_number as member_phone,
-                nm.subscription_status,
-                nm.subscription_start_date,
-                nm.last_payment_date,
-                s.monthly_fee,
-                s.missed_payments_count,
-                s.status as subscription_status
-            FROM houses h
-            LEFT JOIN qr_codes qr ON h.qr_code_id = qr.qr_code_id
-            LEFT JOIN neighborhood_members nm ON h.member_id = nm.member_id
-            LEFT JOIN users u ON nm.member_id = u.user_id
-            LEFT JOIN subscriptions s ON nm.member_id = s.member_id AND s.status != 'cancelled'
-            WHERE h.house_id = ${id}
-        `;
+        const { data: house, error } = await supabase
+            .from('houses')
+            .select(`
+                house_id,
+                house_number,
+                street_address,
+                status,
+                created_at,
+                updated_at,
+                qr_code_id,
+                qr_codes (
+                    qr_code_value,
+                    gate_name,
+                    location_description,
+                    is_active
+                ),
+                member_id,
+                neighborhood_members (
+                    subscription_status,
+                    subscription_start_date,
+                    last_payment_date,
+                    users!inner (
+                        first_name,
+                        last_name,
+                        email,
+                        phone_number
+                    ),
+                    subscriptions (
+                        monthly_fee,
+                        missed_payments_count,
+                        status
+                    )
+                )
+            `)
+            .eq('house_id', id)
+            .single();
 
-        if (house.length === 0) {
+        if (error || !house) {
             return res.status(404).json({ 
                 success: false, 
                 message: "House not found" 
@@ -599,46 +631,46 @@ export const getHouse = async (req, res) => {
 
         // Get patrol history for this house (if QR code exists)
         let patrolHistory = [];
-        if (house[0].qr_code_id) {
-            patrolHistory = await sql`
-                SELECT 
-                    ps.scan_id,
-                    ps.scan_timestamp,
-                    ps.comments,
-                    u.first_name as officer_first_name,
-                    u.last_name as officer_last_name,
-                    so.employee_id
-                FROM patrol_scans ps
-                JOIN security_officers so ON ps.officer_id = so.officer_id
-                JOIN users u ON so.officer_id = u.user_id
-                WHERE ps.qr_code_id = ${house[0].qr_code_id}
-                ORDER BY ps.scan_timestamp DESC
-                LIMIT 20
-            `;
+        if (house.qr_code_id) {
+            const { data: patrols } = await supabase
+                .from('patrol_scans')
+                .select(`
+                    scan_id,
+                    scan_timestamp,
+                    comments,
+                    security_officers!inner (
+                        employee_id,
+                        users!inner (
+                            first_name,
+                            last_name
+                        )
+                    )
+                `)
+                .eq('qr_code_id', house.qr_code_id)
+                .order('scan_timestamp', { ascending: false })
+                .limit(20);
+
+            patrolHistory = patrols || [];
         }
 
         // Get payment history if member exists
         let paymentHistory = [];
-        if (house[0].member_id) {
-            paymentHistory = await sql`
-                SELECT 
-                    payment_id,
-                    amount,
-                    payment_method,
-                    payment_status,
-                    payment_date,
-                    month_paid_for
-                FROM payments
-                WHERE member_id = ${house[0].member_id}
-                ORDER BY payment_date DESC
-                LIMIT 12
-            `;
+        if (house.member_id) {
+            const { data: payments } = await supabase
+                .from('payments')
+                .select('payment_id, amount, payment_method, payment_status, payment_date, month_paid_for')
+                .eq('member_id', house.member_id)
+                .order('payment_date', { ascending: false })
+                .limit(12);
+
+            paymentHistory = payments || [];
         }
+
         console.log("house fetched");
         res.status(200).json({ 
             success: true, 
             data: {
-                ...house[0],
+                ...house,
                 patrol_history: patrolHistory,
                 payment_history: paymentHistory
             }
@@ -655,23 +687,26 @@ export const addBackHouse = async (req, res) => {
         const { id } = req.params;
 
         // Check if house exists
-        const house = await sql `
-            SELECT 
-                h.house_id, 
-                h.house_number, 
-                h.street_address,
-                h.status,
-                h.member_id,
-                u.first_name,
-                u.last_name,
-                u.email
-            FROM houses h
-            LEFT JOIN neighborhood_members nm ON h.member_id = nm.member_id
-            LEFT JOIN users u ON nm.member_id = u.user_id
-            WHERE h.house_id = ${id}
-        `;
+        const { data: house, error: findError } = await supabase
+            .from('houses')
+            .select(`
+                house_id,
+                house_number,
+                street_address,
+                status,
+                member_id,
+                neighborhood_members (
+                    users!inner (
+                        first_name,
+                        last_name,
+                        email
+                    )
+                )
+            `)
+            .eq('house_id', id)
+            .single();
 
-        if (house.length === 0) {
+        if (findError || !house) {
             return res.status(404).json({ 
                 success: false, 
                 message: "House not found" 
@@ -679,7 +714,7 @@ export const addBackHouse = async (req, res) => {
         }
 
         // Check if house is already active
-        if (house[0].status === 'active') {
+        if (house.status === 'active') {
             return res.status(400).json({ 
                 success: false, 
                 message: "House is already active in monitoring" 
@@ -687,90 +722,69 @@ export const addBackHouse = async (req, res) => {
         }
 
         // Reactivate the house
-        await sql `
-            UPDATE houses 
-            SET status = 'active'
-            WHERE house_id = ${id}
-        `;
+        const { error: updateHouseError } = await supabase
+            .from('houses')
+            .update({ status: 'active' })
+            .eq('house_id', id);
+
+        if (updateHouseError) throw updateHouseError;
 
         // If there's a member, reactivate their subscription
-        if (house[0].member_id) {
-            await sql`
-                UPDATE neighborhood_members
-                SET subscription_status = 'active'
-                WHERE member_id = ${house[0].member_id}
-            `;
+        if (house.member_id) {
+            await supabase
+                .from('neighborhood_members')
+                .update({ subscription_status: 'active' })
+                .eq('member_id', house.member_id);
 
-            await sql`
-                UPDATE subscriptions
-                SET 
-                    status = 'active',
-                    missed_payments_count = 0
-                WHERE member_id = ${house[0].member_id} AND status = 'suspended'
-            `;
+            await supabase
+                .from('subscriptions')
+                .update({
+                    status: 'active',
+                    missed_payments_count: 0
+                })
+                .eq('member_id', house.member_id)
+                .eq('status', 'suspended');
 
             // Send notification to the member
-            await sql `
-                INSERT INTO notifications (
-                    user_id, 
-                    notification_type, 
-                    subject, 
-                    message,
-                    related_entity_type,
-                    related_entity_id
-                )
-                VALUES (
-                    ${house[0].member_id},
-                    'email',
-                    'House Reinstated for Monitoring',
-                    ${`Good news! Your house at ${house[0].house_number} ${house[0].street_address} has been reinstated for security monitoring. Patrols will resume immediately.`},
-                    'house',
-                    ${id}
-                )
-            `;
+            await supabase.from('notifications').insert({
+                user_id: house.member_id,
+                notification_type: 'email',
+                subject: 'House Reinstated for Monitoring',
+                message: `Good news! Your house at ${house.house_number} ${house.street_address} has been reinstated for security monitoring. Patrols will resume immediately.`,
+                related_entity_type: 'house',
+                related_entity_id: id
+            });
         }
 
-        // Notify security officers
-        await sql `
-            INSERT INTO notifications (
-                user_id, 
-                notification_type, 
-                subject, 
-                message,
-                related_entity_type,
-                related_entity_id
-            )
-            SELECT 
-                so.officer_id,
-                'push',
-                'House Added Back to Patrol',
-                ${`House at ${house[0].house_number} ${house[0].street_address} has been reinstated for patrol monitoring.`},
-                'house',
-                ${id}
-            FROM security_officers so
-            JOIN users u ON so.officer_id = u.user_id
-            WHERE u.status = 'active' AND so.is_permanently_deleted = false
-        `;
+        // Get all active officers
+        const { data: officers } = await supabase
+            .from('security_officers')
+            .select('officer_id')
+            .eq('is_permanently_deleted', false);
+
+        if (officers) {
+            // Notify security officers
+            const notifications = officers.map(officer => ({
+                user_id: officer.officer_id,
+                notification_type: 'push',
+                subject: 'House Added Back to Patrol',
+                message: `House at ${house.house_number} ${house.street_address} has been reinstated for patrol monitoring.`,
+                related_entity_type: 'house',
+                related_entity_id: id
+            }));
+
+            await supabase.from('notifications').insert(notifications);
+        }
 
         // Create audit log
-        await sql`
-            INSERT INTO audit_logs (
-                user_id,
-                action_type,
-                entity_type,
-                entity_id,
-                old_value,
-                new_value
-            )
-            VALUES (
-                ${req.user?.user_id || null},
-                'REINSTATE_HOUSE',
-                'house',
-                ${id},
-                ${JSON.stringify({ status: house[0].status })},
-                ${JSON.stringify({ status: 'active' })}
-            )
-        `;
+        await supabase.from('audit_logs').insert({
+            user_id: req.user?.user_id || null,
+            action_type: 'REINSTATE_HOUSE',
+            entity_type: 'house',
+            entity_id: id,
+            old_value: JSON.stringify({ status: house.status }),
+            new_value: JSON.stringify({ status: 'active' })
+        });
 
         console.log(`House ${id} reinstated for monitoring`);
         res.status(200).json({ 
@@ -781,101 +795,7 @@ export const addBackHouse = async (req, res) => {
         console.error("Error reinstating house:", error);
         res.status(500).json({ success: false, message: "Internal server error" });
     }
-
-    try {
-        const { id } = req.params;
-
-        const house = await sql `
-            SELECT 
-                h.house_id,
-                h.house_number,
-                h.street_address,
-                h.status,
-                h.created_at,
-                h.updated_at,
-                qr.qr_code_id,
-                qr.qr_code_value,
-                qr.gate_name,
-                qr.location_description,
-                qr.is_active as qr_active,
-                nm.member_id,
-                u.first_name as member_first_name,
-                u.last_name as member_last_name,
-                u.email as member_email,
-                u.phone_number as member_phone,
-                nm.subscription_status,
-                nm.subscription_start_date,
-                nm.last_payment_date,
-                s.monthly_fee,
-                s.missed_payments_count,
-                s.status as subscription_status
-            FROM houses h
-            LEFT JOIN qr_codes qr ON h.qr_code_id = qr.qr_code_id
-            LEFT JOIN neighborhood_members nm ON h.member_id = nm.member_id
-            LEFT JOIN users u ON nm.member_id = u.user_id
-            LEFT JOIN subscriptions s ON nm.member_id = s.member_id AND s.status != 'cancelled'
-            WHERE h.house_id = ${id}
-        `;
-
-        if (house.length === 0) {
-            return res.status(404).json({ 
-                success: false, 
-                message: "House not found" 
-            });
-        }
-
-        // Get patrol history for this house (if QR code exists)
-        let patrolHistory = [];
-        if (house[0].qr_code_id) {
-            patrolHistory = await sql`
-                SELECT 
-                    ps.scan_id,
-                    ps.scan_timestamp,
-                    ps.comments,
-                    u.first_name as officer_first_name,
-                    u.last_name as officer_last_name,
-                    so.employee_id
-                FROM patrol_scans ps
-                JOIN security_officers so ON ps.officer_id = so.officer_id
-                JOIN users u ON so.officer_id = u.user_id
-                WHERE ps.qr_code_id = ${house[0].qr_code_id}
-                ORDER BY ps.scan_timestamp DESC
-                LIMIT 20
-            `;
-        }
-
-        // Get payment history if member exists
-        let paymentHistory = [];
-        if (house[0].member_id) {
-            paymentHistory = await sql`
-                SELECT 
-                    payment_id,
-                    amount,
-                    payment_method,
-                    payment_status,
-                    payment_date,
-                    month_paid_for
-                FROM payments
-                WHERE member_id = ${house[0].member_id}
-                ORDER BY payment_date DESC
-                LIMIT 12
-            `;
-        }
-
-        res.status(200).json({ 
-            success: true, 
-            data: {
-                ...house[0],
-                patrol_history: patrolHistory,
-                payment_history: paymentHistory
-            }
-        });
-    } catch (error) {
-        console.error("Error fetching house:", error);
-        res.status(500).json({ success: false, message: "Internal server error" });
-    }
 };
-
 
 /** ADMIN ROUTES */
 
@@ -900,11 +820,13 @@ export const addAdmin = async (req, res) => {
         }
 
         // Check if email already exists
-        const existingUser = await sql`
-            SELECT user_id FROM users WHERE email = ${email}
-        `;
+        const { data: existingUser } = await supabase
+            .from('users')
+            .select('user_id')
+            .eq('email', email)
+            .single();
 
-        if (existingUser.length > 0) {
+        if (existingUser) {
             return res.status(409).json({ 
                 success: false, 
                 message: "Email already registered" 
@@ -918,73 +840,55 @@ export const addAdmin = async (req, res) => {
         const created_by_admin_id = req.user?.user_id || null;
 
         // Insert user first
-        const newUser = await sql`
-            INSERT INTO users (
+        const { data: newUser, error: userError } = await supabase
+            .from('users')
+            .insert({
                 email, 
                 password_hash, 
                 phone_number, 
                 first_name, 
                 last_name, 
-                user_type, 
-                status,
-                is_approved
-            )
-            VALUES (
-                ${email}, 
-                ${password_hash}, 
-                ${phone_number}, 
-                ${first_name}, 
-                ${last_name}, 
-                'admin',
-                'active',
-                true
-            )
-            RETURNING user_id, email, first_name, last_name, phone_number, user_type
-        `;
+                user_type: 'admin', 
+                status: 'active',
+                is_approved: true
+            })
+            .select()
+            .single();
+
+        if (userError) throw userError;
 
         // Insert into administrators table
-        const newAdmin = await sql`
-            INSERT INTO administrators (
-                admin_id, 
+        const { data: newAdmin, error: adminError } = await supabase
+            .from('administrators')
+            .insert({
+                admin_id: newUser.user_id, 
                 created_by_admin_id,
-                can_modify_system_config
-            )
-            VALUES (
-                ${newUser[0].user_id}, 
-                ${created_by_admin_id},
-                ${can_modify_system_config || false}
-            )
-            RETURNING *
-        `;
+                can_modify_system_config: can_modify_system_config || false
+            })
+            .select()
+            .single();
+
+        if (adminError) throw adminError;
 
         // Create audit log
-        await sql`
-            INSERT INTO audit_logs (
-                user_id,
-                action_type,
-                entity_type,
-                entity_id,
-                new_value
-            )
-            VALUES (
-                ${created_by_admin_id},
-                'CREATE_ADMIN',
-                'administrator',
-                ${newUser[0].user_id},
-                ${JSON.stringify({ 
-                    email, 
-                    can_modify_system_config: can_modify_system_config || false 
-                })}
-            )
-        `;
+        await supabase.from('audit_logs').insert({
+            user_id: created_by_admin_id,
+            action_type: 'CREATE_ADMIN',
+            entity_type: 'administrator',
+            entity_id: newUser.user_id,
+            new_value: JSON.stringify({ 
+                email, 
+                can_modify_system_config: can_modify_system_config || false 
+            })
+        });
 
         console.log("Admin added successfully");
         res.status(201).json({ 
             success: true, 
             message: "Admin account created successfully",
             data: {
-                ...newUser[0],
-                can_modify_system_config: newAdmin[0].can_modify_system_config
+                ...newUser,
+                can_modify_system_config: newAdmin.can_modify_system_config
             }
         });
     } catch (error) {
@@ -1007,14 +911,21 @@ export const removeAdmin = async (req, res) => {
         }
 
         // Check if admin exists
-        const admin = await sql`
-            SELECT a.admin_id, u.first_name, u.last_name, u.email, a.can_modify_system_config
-            FROM administrators a
-            JOIN users u ON a.admin_id = u.user_id
-            WHERE a.admin_id = ${id}
-        `;
+        const { data: admin, error: findError } = await supabase
+            .from('administrators')
+            .select(`
+                admin_id,
+                can_modify_system_config,
+                users!inner (
+                    first_name,
+                    last_name,
+                    email
+                )
+            `)
+            .eq('admin_id', id)
+            .single();
 
-        if (admin.length === 0) {
+        if (findError || !admin) {
             return res.status(404).json({ 
                 success: false, 
                 message: "Admin not found" 
@@ -1022,14 +933,14 @@ export const removeAdmin = async (req, res) => {
         }
 
         // Check if the requesting admin has permission to delete admins with system config privileges
-        if (admin[0].can_modify_system_config) {
-            const requestingAdmin = await sql`
-                SELECT can_modify_system_config 
-                FROM administrators 
-                WHERE admin_id = ${req.user?.user_id}
-            `;
+        if (admin.can_modify_system_config) {
+            const { data: requestingAdmin } = await supabase
+                .from('administrators')
+                .select('can_modify_system_config')
+                .eq('admin_id', req.user?.user_id)
+                .single();
 
-            if (requestingAdmin.length === 0 || !requestingAdmin[0].can_modify_system_config) {
+            if (!requestingAdmin || !requestingAdmin.can_modify_system_config) {
                 return res.status(403).json({ 
                     success: false, 
                     message: "You don't have permission to remove an admin with system configuration privileges" 
@@ -1038,51 +949,45 @@ export const removeAdmin = async (req, res) => {
         }
 
         // Check if this admin has created other admins
-        const createdAdmins = await sql`
-            SELECT COUNT(*) as count
-            FROM administrators
-            WHERE created_by_admin_id = ${id}
-        `;
+        const { count } = await supabase
+            .from('administrators')
+            .select('*', { count: 'exact', head: true })
+            .eq('created_by_admin_id', id);
 
-        if (parseInt(createdAdmins[0].count) > 0) {
+        if (count > 0) {
             return res.status(400).json({ 
                 success: false, 
-                message: `Cannot delete admin. This admin has created ${createdAdmins[0].count} other admin account(s). Please reassign or remove those accounts first.` 
+                message: `Cannot delete admin. This admin has created ${count} other admin account(s). Please reassign or remove those accounts first.` 
             });
         }
 
-        // Delete admin record (this will cascade to user due to ON DELETE CASCADE)
-        await sql`
-            DELETE FROM administrators
-            WHERE admin_id = ${id}
-        `;
+        // Delete admin record
+        const { error: deleteAdminError } = await supabase
+            .from('administrators')
+            .delete()
+            .eq('admin_id', id);
 
-        await sql`
-            DELETE FROM users
-            WHERE user_id = ${id}
-        `;
+        if (deleteAdminError) throw deleteAdminError;
+
+        const { error: deleteUserError } = await supabase
+            .from('users')
+            .delete()
+            .eq('user_id', id);
+
+        if (deleteUserError) throw deleteUserError;
 
         // Create audit log
-        await sql`
-            INSERT INTO audit_logs (
-                user_id,
-                action_type,
-                entity_type,
-                entity_id,
-                old_value
-            )
-            VALUES (
-                ${req.user?.user_id || null},
-                'DELETE_ADMIN',
-                'administrator',
-                ${id},
-                ${JSON.stringify({ 
-                    email: admin[0].email,
-                    name: `${admin[0].first_name} ${admin[0].last_name}`,
-                    can_modify_system_config: admin[0].can_modify_system_config
-                })}
-            )
-        `;
+        await supabase.from('audit_logs').insert({
+            user_id: req.user?.user_id || null,
+            action_type: 'DELETE_ADMIN',
+            entity_type: 'administrator',
+            entity_id: id,
+            old_value: JSON.stringify({ 
+                email: admin.users.email,
+                name: `${admin.users.first_name} ${admin.users.last_name}`,
+                can_modify_system_config: admin.can_modify_system_config
+            })
+        });
 
         console.log(`Admin ${id} removed successfully`);
         res.status(200).json({ 
@@ -1099,70 +1004,73 @@ export const removeAdmin = async (req, res) => {
 //get all users
 export const getAllUsers = async (req, res) => {
     try {
-        const users = await sql`
-            SELECT 
-                u.user_id,
-                u.email,
-                u.phone_number,
-                u.first_name,
-                u.last_name,
-                u.user_type,
-                u.status,
-                u.is_approved,
-                u.last_login,
-                u.created_at,
-                u.updated_at,
-                CASE 
-                    WHEN u.user_type = 'admin' THEN (
-                        SELECT json_build_object(
-                            'can_modify_system_config', a.can_modify_system_config,
-                            'created_by_admin_id', a.created_by_admin_id
-                        )
-                        FROM administrators a 
-                        WHERE a.admin_id = u.user_id
-                    )
-                    WHEN u.user_type = 'security_officer' THEN (
-                        SELECT json_build_object(
-                            'employee_id', so.employee_id,
-                            'suspension_start_date', so.suspension_start_date,
-                            'suspension_end_date', so.suspension_end_date,
-                            'suspension_reason', so.suspension_reason,
-                            'is_permanently_deleted', so.is_permanently_deleted
-                        )
-                        FROM security_officers so 
-                        WHERE so.officer_id = u.user_id
-                    )
-                    WHEN u.user_type = 'neighborhood_member' THEN (
-                        SELECT json_build_object(
-                            'subscription_status', nm.subscription_status,
-                            'subscription_start_date', nm.subscription_start_date,
-                            'last_payment_date', nm.last_payment_date
-                        )
-                        FROM neighborhood_members nm 
-                        WHERE nm.member_id = u.user_id
-                    )
-                    ELSE NULL
-                END as role_details
-            FROM users u
-            WHERE u.status != 'deleted'
-            ORDER BY u.created_at DESC
-        `;
+        const { data: users, error } = await supabase
+            .from('users')
+            .select(`
+                user_id,
+                email,
+                phone_number,
+                first_name,
+                last_name,
+                user_type,
+                status,
+                is_approved,
+                last_login,
+                created_at,
+                updated_at
+            `)
+            .neq('status', 'deleted')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        // Get role details for each user
+        const usersWithDetails = await Promise.all(users.map(async (user) => {
+            let role_details = null;
+
+            if (user.user_type === 'admin') {
+                const { data: admin } = await supabase
+                    .from('administrators')
+                    .select('can_modify_system_config, created_by_admin_id')
+                    .eq('admin_id', user.user_id)
+                    .single();
+                role_details = admin;
+            } else if (user.user_type === 'security_officer') {
+                const { data: officer } = await supabase
+                    .from('security_officers')
+                    .select('employee_id, suspension_start_date, suspension_end_date, suspension_reason, is_permanently_deleted')
+                    .eq('officer_id', user.user_id)
+                    .single();
+                role_details = officer;
+            } else if (user.user_type === 'neighborhood_member') {
+                const { data: member } = await supabase
+                    .from('neighborhood_members')
+                    .select('subscription_status, subscription_start_date, last_payment_date')
+                    .eq('member_id', user.user_id)
+                    .single();
+                role_details = member;
+            }
+
+            return { ...user, role_details };
+        }));
 
         console.log("All users fetched");
         res.status(200).json({ 
             success: true, 
-            data: users,
-            count: users.length
+            data: usersWithDetails,
+            count: usersWithDetails.length
         });
     } catch (error) {
         console.error("Error fetching all users:", error);
         res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
+
 export const getMembers = async (req, res) => {
   try {
-    const query = `
-      SELECT 
+    const { data: members, error } = await supabase
+      .from('users')
+      .select(`
         user_id,
         first_name,
         last_name,
@@ -1174,12 +1082,11 @@ export const getMembers = async (req, res) => {
         last_login,
         created_at,
         updated_at
-      FROM users
-      WHERE user_type = 'neighborhood_member'
-      ORDER BY created_at DESC
-    `;
+      `)
+      .eq('user_type', 'neighborhood_member')
+      .order('created_at', { ascending: false });
 
-    const [members] = await pool.query(query);
+    if (error) throw error;
 
     return res.status(200).json({
       success: true,
@@ -1197,6 +1104,7 @@ export const getMembers = async (req, res) => {
     });
   }
 };
+
 /**
  * Add a new user (supports all user types: admin, security_officer, neighborhood_member)
  * @route POST /api/admin/users
@@ -1285,17 +1193,17 @@ export const addUser = async (req, res) => {
     // CHECK FOR DUPLICATES
     // ============================================
     
-    const existingUser = await sql`
-      SELECT user_id, email 
-      FROM users 
-      WHERE email = ${email}
-    `;
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('user_id, email')
+      .eq('email', email)
+      .single();
 
-    if (existingUser.length > 0) {
+    if (existingUser) {
       return res.status(409).json({
         success: false,
         message: 'Email already exists',
-        existingUserId: existingUser[0].user_id
+        existingUserId: existingUser.user_id
       });
     }
 
@@ -1310,44 +1218,24 @@ export const addUser = async (req, res) => {
     // INSERT NEW USER
     // ============================================
     
-    const newUser = await sql`
-      INSERT INTO users (
+    const { data: newUser, error: userError } = await supabase
+      .from('users')
+      .insert({
         first_name,
         last_name,
         email,
-        phone_number,
-        password_hash,
+        phone_number: phone_number || null,
+        password_hash: hashedPassword,
         user_type,
         status,
-        is_approved,
-        created_at,
-        updated_at
-      ) VALUES (
-        ${first_name},
-        ${last_name},
-        ${email},
-        ${phone_number || null},
-        ${hashedPassword},
-        ${user_type}::user_type_enum,
-        ${status}::user_status_enum,
-        ${is_approved},
-        CURRENT_TIMESTAMP,
-        CURRENT_TIMESTAMP
-      )
-      RETURNING 
-        user_id,
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        user_type,
-        status,
-        is_approved,
-        created_at,
-        updated_at
-    `;
+        is_approved
+      })
+      .select()
+      .single();
 
-    const userId = newUser[0].user_id;
+    if (userError) throw userError;
+
+    const userId = newUser.user_id;
 
     // ============================================
     // CREATE RELATED RECORDS BASED ON USER TYPE
@@ -1357,67 +1245,47 @@ export const addUser = async (req, res) => {
       // Create security officer record
       const generatedEmployeeId = employee_id || `SO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
       
-      await sql`
-        INSERT INTO security_officers (
-          officer_id,
-          employee_id,
-          approved_by_admin_id,
-          is_permanently_deleted,
-          created_at,
-          updated_at
-        ) VALUES (
-          ${userId},
-          ${generatedEmployeeId},
-          ${req.user?.user_id || null},
-          false,
-          CURRENT_TIMESTAMP,
-          CURRENT_TIMESTAMP
-        )
-      `;
+      const { error: officerError } = await supabase
+        .from('security_officers')
+        .insert({
+          officer_id: userId,
+          employee_id: generatedEmployeeId,
+          approved_by_admin_id: req.user?.user_id || null,
+          is_permanently_deleted: false
+        });
+
+      if (officerError) throw officerError;
 
       console.log(`✅ Security officer created with employee_id: ${generatedEmployeeId}`);
     } 
     else if (user_type === 'neighborhood_member') {
       // Create neighborhood member record
-      await sql`
-        INSERT INTO neighborhood_members (
-          member_id,
-          house_number,
-          street_address,
-          subscription_status,
-          subscription_start_date,
-          approved_by_admin_id,
-          created_at,
-          updated_at
-        ) VALUES (
-          ${userId},
-          ${house_number || null},
-          ${street_address || null},
-          ${subscription_status || 'active'}::subscription_status_enum,
-          ${subscription_start_date || null},
-          ${req.user?.user_id || null},
-          CURRENT_TIMESTAMP,
-          CURRENT_TIMESTAMP
-        )
-      `;
+      const { error: memberError } = await supabase
+        .from('neighborhood_members')
+        .insert({
+          member_id: userId,
+          house_number: house_number || null,
+          street_address: street_address || null,
+          subscription_status: subscription_status || 'active',
+          subscription_start_date: subscription_start_date || null,
+          approved_by_admin_id: req.user?.user_id || null
+        });
+
+      if (memberError) throw memberError;
 
       console.log(`✅ Neighborhood member created`);
     }
     else if (user_type === 'admin') {
       // Create administrator record
-      await sql`
-        INSERT INTO administrators (
-          admin_id,
-          created_by_admin_id,
-          can_modify_system_config,
-          created_at
-        ) VALUES (
-          ${userId},
-          ${req.user?.user_id || null},
-          ${can_modify_system_config},
-          CURRENT_TIMESTAMP
-        )
-      `;
+      const { error: adminError } = await supabase
+        .from('administrators')
+        .insert({
+          admin_id: userId,
+          created_by_admin_id: req.user?.user_id || null,
+          can_modify_system_config
+        });
+
+      if (adminError) throw adminError;
 
       console.log(`✅ Administrator created with can_modify_system_config: ${can_modify_system_config}`);
     }
@@ -1431,7 +1299,7 @@ export const addUser = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: `${getUserTypeLabel(user_type)} created successfully`,
-      data: newUser[0]
+      data: newUser
     });
 
   } catch (error) {
@@ -1443,8 +1311,6 @@ export const addUser = async (req, res) => {
     });
   }
 };
-
-
 
 /**
  * Helper function to get user-friendly label for user type
@@ -1467,15 +1333,16 @@ export const getMember = async (req, res) => {
     const { id } = req.params;
 
     // Validate ID
-    if (!id || isNaN(id)) {
+    if (!id) {
       return res.status(400).json({
         success: false,
         message: 'Valid member ID is required'
       });
     }
 
-    const query = `
-      SELECT 
+    const { data: member, error } = await supabase
+      .from('users')
+      .select(`
         user_id,
         first_name,
         last_name,
@@ -1487,13 +1354,12 @@ export const getMember = async (req, res) => {
         last_login,
         created_at,
         updated_at
-      FROM users
-      WHERE user_id = ? AND user_type = 'neighborhood_member'
-    `;
+      `)
+      .eq('user_id', id)
+      .eq('user_type', 'neighborhood_member')
+      .single();
 
-    const [members] = await pool.query(query, [id]);
-
-    if (members.length === 0) {
+    if (error || !member) {
       return res.status(404).json({
         success: false,
         message: 'Member not found'
@@ -1503,7 +1369,7 @@ export const getMember = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Member retrieved successfully',
-      data: members[0]
+      data: member
     });
 
   } catch (error) {
@@ -1511,126 +1377,6 @@ export const getMember = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch member',
-      error: error.message
-    });
-  }
-};
-
-/**
- * Add a new member
- * @route POST /api/members
- */
-export const addMember = async (req, res) => {
-  try {
-    const {
-      first_name,
-      last_name,
-      email,
-      phone_number,
-      password,
-      status = 'active',
-      is_approved = false
-    } = req.body;
-
-    // Validation
-    if (!first_name || !last_name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'First name, last name, email, and password are required'
-      });
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid email format'
-      });
-    }
-
-    // Validate phone number if provided
-    if (phone_number) {
-      const phoneRegex = /^[0-9+\-\s()]+$/;
-      if (!phoneRegex.test(phone_number)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid phone number format'
-        });
-      }
-    }
-
-    // Check if email already exists
-    const [existingUser] = await pool.query(
-      'SELECT user_id FROM users WHERE email = ?',
-      [email]
-    );
-
-    if (existingUser.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'Email already exists'
-      });
-    }
-
-    // Hash password
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    // Insert new member
-    const insertQuery = `
-      INSERT INTO users (
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        password_hash,
-        user_type,
-        status,
-        is_approved,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'neighborhood_member', ?, ?, NOW(), NOW())
-    `;
-
-    const [result] = await pool.query(insertQuery, [
-      first_name,
-      last_name,
-      email,
-      phone_number || null,
-      hashedPassword,
-      status,
-      is_approved
-    ]);
-
-    // Fetch the newly created member
-    const [newMember] = await pool.query(
-      `SELECT 
-        user_id,
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        user_type,
-        status,
-        is_approved,
-        created_at
-      FROM users
-      WHERE user_id = ?`,
-      [result.insertId]
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: 'Member created successfully',
-      data: newMember[0]
-    });
-
-  } catch (error) {
-    console.error('Error adding member:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to add member',
       error: error.message
     });
   }
@@ -1653,7 +1399,7 @@ export const updateMember = async (req, res) => {
     } = req.body;
 
     // Validate ID
-    if (!id || isNaN(id)) {
+    if (!id) {
       return res.status(400).json({
         success: false,
         message: 'Valid member ID is required'
@@ -1661,12 +1407,14 @@ export const updateMember = async (req, res) => {
     }
 
     // Check if member exists
-    const [existingMember] = await pool.query(
-      'SELECT user_id FROM users WHERE user_id = ? AND user_type = ?',
-      [id, 'neighborhood_member']
-    );
+    const { data: existingMember, error: findError } = await supabase
+      .from('users')
+      .select('user_id')
+      .eq('user_id', id)
+      .eq('user_type', 'neighborhood_member')
+      .single();
 
-    if (existingMember.length === 0) {
+    if (findError || !existingMember) {
       return res.status(404).json({
         success: false,
         message: 'Member not found'
@@ -1683,12 +1431,14 @@ export const updateMember = async (req, res) => {
         });
       }
 
-      const [duplicateEmail] = await pool.query(
-        'SELECT user_id FROM users WHERE email = ? AND user_id != ?',
-        [email, id]
-      );
+      const { data: duplicateEmail } = await supabase
+        .from('users')
+        .select('user_id')
+        .eq('email', email)
+        .neq('user_id', id)
+        .single();
 
-      if (duplicateEmail.length > 0) {
+      if (duplicateEmail) {
         return res.status(409).json({
           success: false,
           message: 'Email already exists'
@@ -1696,76 +1446,38 @@ export const updateMember = async (req, res) => {
       }
     }
 
-    // Build update query dynamically
-    const updates = [];
-    const values = [];
+    // Build update object
+    const updates = {};
+    if (first_name !== undefined) updates.first_name = first_name;
+    if (last_name !== undefined) updates.last_name = last_name;
+    if (email !== undefined) updates.email = email;
+    if (phone_number !== undefined) updates.phone_number = phone_number;
+    if (status !== undefined) updates.status = status;
+    if (is_approved !== undefined) updates.is_approved = is_approved;
 
-    if (first_name !== undefined) {
-      updates.push('first_name = ?');
-      values.push(first_name);
-    }
-    if (last_name !== undefined) {
-      updates.push('last_name = ?');
-      values.push(last_name);
-    }
-    if (email !== undefined) {
-      updates.push('email = ?');
-      values.push(email);
-    }
-    if (phone_number !== undefined) {
-      updates.push('phone_number = ?');
-      values.push(phone_number);
-    }
-    if (status !== undefined) {
-      updates.push('status = ?');
-      values.push(status);
-    }
-    if (is_approved !== undefined) {
-      updates.push('is_approved = ?');
-      values.push(is_approved);
-    }
-
-    if (updates.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return res.status(400).json({
         success: false,
         message: 'No fields to update'
       });
     }
 
-    updates.push('updated_at = NOW()');
-    values.push(id);
+    updates.updated_at = new Date().toISOString();
 
-    const updateQuery = `
-      UPDATE users 
-      SET ${updates.join(', ')}
-      WHERE user_id = ? AND user_type = 'neighborhood_member'
-    `;
+    const { data: updatedMember, error: updateError } = await supabase
+      .from('users')
+      .update(updates)
+      .eq('user_id', id)
+      .eq('user_type', 'neighborhood_member')
+      .select()
+      .single();
 
-    await pool.query(updateQuery, values);
-
-    // Fetch updated member
-    const [updatedMember] = await pool.query(
-      `SELECT 
-        user_id,
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        user_type,
-        status,
-        is_approved,
-        last_login,
-        created_at,
-        updated_at
-      FROM users
-      WHERE user_id = ?`,
-      [id]
-    );
+    if (updateError) throw updateError;
 
     return res.status(200).json({
       success: true,
       message: 'Member updated successfully',
-      data: updatedMember[0]
+      data: updatedMember
     });
 
   } catch (error) {
@@ -1787,7 +1499,7 @@ export const deleteMember = async (req, res) => {
     const { id } = req.params;
 
     // Validate ID
-    if (!id || isNaN(id)) {
+    if (!id) {
       return res.status(400).json({
         success: false,
         message: 'Valid member ID is required'
@@ -1795,12 +1507,14 @@ export const deleteMember = async (req, res) => {
     }
 
     // Check if member exists
-    const [existingMember] = await pool.query(
-      'SELECT user_id FROM users WHERE user_id = ? AND user_type = ?',
-      [id, 'neighborhood_member']
-    );
+    const { data: existingMember, error: findError } = await supabase
+      .from('users')
+      .select('user_id')
+      .eq('user_id', id)
+      .eq('user_type', 'neighborhood_member')
+      .single();
 
-    if (existingMember.length === 0) {
+    if (findError || !existingMember) {
       return res.status(404).json({
         success: false,
         message: 'Member not found'
@@ -1808,12 +1522,16 @@ export const deleteMember = async (req, res) => {
     }
 
     // Soft delete - update status to 'deleted'
-    await pool.query(
-      `UPDATE users 
-       SET status = 'deleted', updated_at = NOW() 
-       WHERE user_id = ? AND user_type = 'neighborhood_member'`,
-      [id]
-    );
+    const { error: deleteError } = await supabase
+      .from('users')
+      .update({ 
+        status: 'deleted',
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', id)
+      .eq('user_type', 'neighborhood_member');
+
+    if (deleteError) throw deleteError;
 
     return res.status(200).json({
       success: true,
@@ -1829,8 +1547,6 @@ export const deleteMember = async (req, res) => {
     });
   }
 };
-
-
 
 /**
  * Approve a user (member or admin)
@@ -1858,23 +1574,21 @@ export const approveUser = async (req, res) => {
     // CHECK IF USER EXISTS
     // ============================================
 
-    const user = await sql`
-      SELECT user_id, first_name, last_name, email, user_type, status, is_approved
-      FROM users
-      WHERE user_id = ${id}
-    `;
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('user_id, first_name, last_name, email, user_type, status, is_approved')
+      .eq('user_id', id)
+      .single();
 
-    if (user.length === 0) {
+    if (userError || !user) {
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
-    const currentUser = user[0];
-
     // Check if user is a security officer (should use the officer-specific endpoint)
-    if (currentUser.user_type === 'security_officer') {
+    if (user.user_type === 'security_officer') {
       return res.status(400).json({
         success: false,
         message: 'Please use the security officer approval endpoint for officers'
@@ -1882,7 +1596,7 @@ export const approveUser = async (req, res) => {
     }
 
     // Check if already approved
-    if (currentUser.is_approved && currentUser.status === 'active') {
+    if (user.is_approved && user.status === 'active') {
       return res.status(400).json({
         success: false,
         message: 'User is already approved and active'
@@ -1893,37 +1607,31 @@ export const approveUser = async (req, res) => {
     // UPDATE USER APPROVAL STATUS
     // ============================================
 
-    const updatedUser = await sql`
-      UPDATE users
-      SET 
-        is_approved = true,
-        status = 'active'::user_status_enum,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ${id}
-      RETURNING 
-        user_id,
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        user_type,
-        status,
-        is_approved,
-        updated_at
-    `;
+    const { data: updatedUser, error: updateError } = await supabase
+      .from('users')
+      .update({
+        is_approved: true,
+        status: 'active',
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
 
     // ============================================
     // UPDATE RELATED TABLE (if neighborhood member)
     // ============================================
 
-    if (currentUser.user_type === 'neighborhood_member') {
-      await sql`
-        UPDATE neighborhood_members
-        SET 
-          approved_by_admin_id = ${req.user?.user_id || null},
-          updated_at = CURRENT_TIMESTAMP
-        WHERE member_id = ${id}
-      `;
+    if (user.user_type === 'neighborhood_member') {
+      await supabase
+        .from('neighborhood_members')
+        .update({
+          approved_by_admin_id: req.user?.user_id || null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('member_id', id);
     }
 
     // ============================================
@@ -1932,49 +1640,27 @@ export const approveUser = async (req, res) => {
 
     const notificationMessage = `Your account has been approved! You can now access all features of the Neighborhood Watch system.`;
 
-    await sql`
-      INSERT INTO notifications (
-        user_id,
-        notification_type,
-        subject,
-        message,
-        related_entity_type,
-        related_entity_id,
-        created_at
-      ) VALUES (
-        ${id},
-        'email',
-        'Account Approved',
-        ${notificationMessage},
-        'user',
-        ${id},
-        CURRENT_TIMESTAMP
-      )
-    `;
+    await supabase.from('notifications').insert({
+      user_id: id,
+      notification_type: 'email',
+      subject: 'Account Approved',
+      message: notificationMessage,
+      related_entity_type: 'user',
+      related_entity_id: id
+    });
 
     // ============================================
     // LOG THE ACTION
     // ============================================
 
-    await sql`
-      INSERT INTO audit_logs (
-        user_id,
-        action_type,
-        entity_type,
-        entity_id,
-        old_value,
-        new_value,
-        created_at
-      ) VALUES (
-        ${req.user?.user_id || null},
-        'APPROVE_USER',
-        'user',
-        ${id},
-        ${JSON.stringify({ is_approved: currentUser.is_approved, status: currentUser.status })},
-        ${JSON.stringify({ is_approved: true, status: 'active', approval_notes: approval_notes || 'Approved by admin' })},
-        CURRENT_TIMESTAMP
-      )
-    `;
+    await supabase.from('audit_logs').insert({
+      user_id: req.user?.user_id || null,
+      action_type: 'APPROVE_USER',
+      entity_type: 'user',
+      entity_id: id,
+      old_value: JSON.stringify({ is_approved: user.is_approved, status: user.status }),
+      new_value: JSON.stringify({ is_approved: true, status: 'active', approval_notes: approval_notes || 'Approved by admin' })
+    });
 
     // ============================================
     // SUCCESS RESPONSE
@@ -1985,7 +1671,7 @@ export const approveUser = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'User approved successfully',
-      data: updatedUser[0]
+      data: updatedUser
     });
 
   } catch (error) {
@@ -2032,23 +1718,21 @@ export const rejectUser = async (req, res) => {
     // CHECK IF USER EXISTS
     // ============================================
 
-    const user = await sql`
-      SELECT user_id, first_name, last_name, email, user_type, status, is_approved
-      FROM users
-      WHERE user_id = ${id}
-    `;
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('user_id, first_name, last_name, email, user_type, status, is_approved')
+      .eq('user_id', id)
+      .single();
 
-    if (user.length === 0) {
+    if (userError || !user) {
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
-    const currentUser = user[0];
-
     // Check if user is a security officer (should use the officer-specific endpoint)
-    if (currentUser.user_type === 'security_officer') {
+    if (user.user_type === 'security_officer') {
       return res.status(400).json({
         success: false,
         message: 'Please use the security officer rejection endpoint for officers'
@@ -2056,7 +1740,7 @@ export const rejectUser = async (req, res) => {
     }
 
     // Check if already rejected
-    if (!currentUser.is_approved && currentUser.status === 'inactive') {
+    if (!user.is_approved && user.status === 'inactive') {
       return res.status(400).json({
         success: false,
         message: 'User is already rejected and inactive'
@@ -2067,120 +1751,68 @@ export const rejectUser = async (req, res) => {
     // UPDATE USER APPROVAL STATUS
     // ============================================
 
-    const updatedUser = await sql`
-      UPDATE users
-      SET 
-        is_approved = false,
-        status = 'inactive'::user_status_enum,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ${id}
-      RETURNING 
-        user_id,
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        user_type,
-        status,
-        is_approved,
-        updated_at
-    `;
+    const { data: updatedUser, error: updateError } = await supabase
+      .from('users')
+      .update({
+        is_approved: false,
+        status: 'inactive',
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
 
     // ============================================
     // UPDATE RELATED TABLE (if neighborhood member)
     // ============================================
 
-    if (currentUser.user_type === 'neighborhood_member') {
-      await sql`
-        UPDATE neighborhood_members
-        SET 
-          approved_by_admin_id = ${req.user?.user_id || null},
-          updated_at = CURRENT_TIMESTAMP
-        WHERE member_id = ${id}
-      `;
+    if (user.user_type === 'neighborhood_member') {
+      await supabase
+        .from('neighborhood_members')
+        .update({
+          approved_by_admin_id: req.user?.user_id || null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('member_id', id);
     }
 
     // ============================================
     // SEND NOTIFICATION TO USER
     // ============================================
 
-    // CORRECT SCHEMA for notifications table:
-    // - notification_id: UUID PRIMARY KEY
-    // - user_id: UUID NOT NULL
-    // - notification_type: notification_type_enum NOT NULL
-    // - subject: VARCHAR(255)
-    // - message: TEXT NOT NULL
-    // - sent_at: TIMESTAMP
-    // - delivery_status: VARCHAR(50)
-    // - related_entity_type: VARCHAR(50)
-    // - related_entity_id: UUID
-    // - created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
     const notificationMessage = `Your account approval has been rejected. Reason: ${rejection_reason}. Please contact the administrator for more information.`;
 
-    await sql`
-      INSERT INTO notifications (
-        user_id,
-        notification_type,
-        subject,
-        message,
-        delivery_status,
-        related_entity_type,
-        related_entity_id,
-        created_at
-      ) VALUES (
-        ${id},
-        'email',
-        'Account Approval Rejected',
-        ${notificationMessage},
-        'pending',
-        'user',
-        ${id},
-        CURRENT_TIMESTAMP
-      )
-    `;
+    await supabase.from('notifications').insert({
+      user_id: id,
+      notification_type: 'email',
+      subject: 'Account Approval Rejected',
+      message: notificationMessage,
+      delivery_status: 'pending',
+      related_entity_type: 'user',
+      related_entity_id: id
+    });
 
     // ============================================
     // LOG THE ACTION
     // ============================================
 
-    // CORRECT SCHEMA for audit_logs table:
-    // - log_id: UUID PRIMARY KEY
-    // - user_id: UUID
-    // - action_type: VARCHAR(100) NOT NULL
-    // - entity_type: VARCHAR(100)
-    // - entity_id: UUID
-    // - old_value: JSONB
-    // - new_value: JSONB
-    // - ip_address: INET
-    // - created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
-    await sql`
-      INSERT INTO audit_logs (
-        user_id,
-        action_type,
-        entity_type,
-        entity_id,
-        old_value,
-        new_value,
-        created_at
-      ) VALUES (
-        ${req.user?.user_id || null},
-        'REJECT_USER',
-        'user',
-        ${id},
-        ${JSON.stringify({ 
-          is_approved: currentUser.is_approved, 
-          status: currentUser.status 
-        })},
-        ${JSON.stringify({ 
-          is_approved: false, 
-          status: 'inactive', 
-          rejection_reason 
-        })},
-        CURRENT_TIMESTAMP
-      )
-    `;
+    await supabase.from('audit_logs').insert({
+      user_id: req.user?.user_id || null,
+      action_type: 'REJECT_USER',
+      entity_type: 'user',
+      entity_id: id,
+      old_value: JSON.stringify({ 
+        is_approved: user.is_approved, 
+        status: user.status 
+      }),
+      new_value: JSON.stringify({ 
+        is_approved: false, 
+        status: 'inactive', 
+        rejection_reason 
+      })
+    });
 
     // ============================================
     // SUCCESS RESPONSE
@@ -2191,7 +1823,7 @@ export const rejectUser = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'User rejected successfully',
-      data: updatedUser[0]
+      data: updatedUser
     });
 
   } catch (error) {
@@ -2203,7 +1835,6 @@ export const rejectUser = async (req, res) => {
     });
   }
 };
-
 
 /**
  * Approve or reject a security officer
@@ -2239,33 +1870,34 @@ export const approveOfficer = async (req, res) => {
     // CHECK IF OFFICER EXISTS
     // ============================================
 
-    const officer = await sql`
-      SELECT 
-        u.user_id,
-        u.first_name,
-        u.last_name,
-        u.email,
-        u.user_type,
-        u.status,
-        u.is_approved,
-        so.employee_id,
-        so.is_permanently_deleted
-      FROM users u
-      JOIN security_officers so ON u.user_id = so.officer_id
-      WHERE u.user_id = ${id} AND so.is_permanently_deleted = false
-    `;
+    const { data: officer, error: officerError } = await supabase
+      .from('security_officers')
+      .select(`
+        officer_id,
+        employee_id,
+        is_permanently_deleted,
+        users!inner (
+          user_type,
+          status,
+          is_approved,
+          first_name,
+          last_name,
+          email
+        )
+      `)
+      .eq('officer_id', id)
+      .eq('is_permanently_deleted', false)
+      .single();
 
-    if (officer.length === 0) {
+    if (officerError || !officer) {
       return res.status(404).json({
         success: false,
         message: 'Security officer not found'
       });
     }
 
-    const currentOfficer = officer[0];
-
     // Verify it's actually a security officer
-    if (currentOfficer.user_type !== 'security_officer') {
+    if (officer.users.user_type !== 'security_officer') {
       return res.status(400).json({
         success: false,
         message: 'This user is not a security officer'
@@ -2276,40 +1908,36 @@ export const approveOfficer = async (req, res) => {
     // UPDATE USER APPROVAL STATUS
     // ============================================
 
-    const updatedUser = await sql`
-      UPDATE users
-      SET 
-        is_approved = ${is_approved},
-        status = ${is_approved ? 'active' : 'inactive'}::user_status_enum,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ${id}
-      RETURNING 
-        user_id,
-        first_name,
-        last_name,
-        email,
-        phone_number,
-        user_type,
-        status,
+    const { data: updatedUser, error: updateUserError } = await supabase
+      .from('users')
+      .update({
         is_approved,
-        updated_at
-    `;
+        status: is_approved ? 'active' : 'inactive',
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', id)
+      .select()
+      .single();
+
+    if (updateUserError) throw updateUserError;
 
     // ============================================
     // UPDATE SECURITY OFFICER TABLE
     // ============================================
 
     // Update employee_id if provided during approval
-    const newEmployeeId = employee_id || currentOfficer.employee_id;
+    const newEmployeeId = employee_id || officer.employee_id;
 
-    await sql`
-      UPDATE security_officers
-      SET 
-        approved_by_admin_id = ${req.user?.user_id || null},
-        employee_id = ${newEmployeeId},
-        updated_at = CURRENT_TIMESTAMP
-      WHERE officer_id = ${id}
-    `;
+    const { error: updateOfficerError } = await supabase
+      .from('security_officers')
+      .update({
+        approved_by_admin_id: req.user?.user_id || null,
+        employee_id: newEmployeeId,
+        updated_at: new Date().toISOString()
+      })
+      .eq('officer_id', id);
+
+    if (updateOfficerError) throw updateOfficerError;
 
     // ============================================
     // SEND NOTIFICATION TO OFFICER
@@ -2319,89 +1947,61 @@ export const approveOfficer = async (req, res) => {
       ? `Your security officer account has been approved! Your employee ID is: ${newEmployeeId}. You can now start your duties.`
       : `Your security officer application has been rejected. ${approval_notes || 'Please contact the administrator for more information.'}`;
 
-    await sql`
-      INSERT INTO notifications (
-        user_id,
-        notification_type,
-        subject,
-        message,
-        related_entity_type,
-        related_entity_id,
-        created_at
-      ) VALUES (
-        ${id},
-        'email',
-        ${is_approved ? 'Security Officer Approved' : 'Application Rejected'},
-        ${notificationMessage},
-        'security_officer',
-        ${id},
-        CURRENT_TIMESTAMP
-      )
-    `;
+    await supabase.from('notifications').insert({
+      user_id: id,
+      notification_type: 'email',
+      subject: is_approved ? 'Security Officer Approved' : 'Application Rejected',
+      message: notificationMessage,
+      related_entity_type: 'security_officer',
+      related_entity_id: id
+    });
 
     // ============================================
     // NOTIFY ALL ACTIVE MEMBERS (if approved)
     // ============================================
 
     if (is_approved) {
-      await sql`
-        INSERT INTO notifications (
-          user_id,
-          notification_type,
-          subject,
-          message,
-          related_entity_type,
-          related_entity_id,
-          created_at
-        )
-        SELECT 
-          nm.member_id,
-          'email',
-          'New Security Officer',
-          ${`A new security officer ${currentOfficer.first_name} ${currentOfficer.last_name} (ID: ${newEmployeeId}) has been approved and is now on duty.`},
-          'security_officer',
-          ${id},
-          CURRENT_TIMESTAMP
-        FROM neighborhood_members nm
-        JOIN users u ON nm.member_id = u.user_id
-        WHERE u.status = 'active' AND u.is_approved = true
-      `;
+      const { data: activeMembers } = await supabase
+        .from('neighborhood_members')
+        .select('member_id')
+        .eq('subscription_status', 'active');
 
-      console.log(`✅ Sent notifications to all active members about new officer`);
+      if (activeMembers && activeMembers.length > 0) {
+        const notifications = activeMembers.map(member => ({
+          user_id: member.member_id,
+          notification_type: 'email',
+          subject: 'New Security Officer',
+          message: `A new security officer ${officer.users.first_name} ${officer.users.last_name} (ID: ${newEmployeeId}) has been approved and is now on duty.`,
+          related_entity_type: 'security_officer',
+          related_entity_id: id
+        }));
+
+        await supabase.from('notifications').insert(notifications);
+        console.log(`✅ Sent notifications to all active members about new officer`);
+      }
     }
 
     // ============================================
     // LOG THE ACTION
     // ============================================
 
-    await sql`
-      INSERT INTO audit_logs (
-        user_id,
-        action_type,
-        entity_type,
-        entity_id,
-        old_value,
-        new_value,
-        created_at
-      ) VALUES (
-        ${req.user?.user_id || null},
-        ${is_approved ? 'APPROVE_OFFICER' : 'REJECT_OFFICER'},
-        'security_officer',
-        ${id},
-        ${JSON.stringify({ 
-          is_approved: currentOfficer.is_approved, 
-          status: currentOfficer.status,
-          employee_id: currentOfficer.employee_id
-        })},
-        ${JSON.stringify({ 
-          is_approved, 
-          status: is_approved ? 'active' : 'inactive',
-          employee_id: newEmployeeId,
-          approval_notes 
-        })},
-        CURRENT_TIMESTAMP
-      )
-    `;
+    await supabase.from('audit_logs').insert({
+      user_id: req.user?.user_id || null,
+      action_type: is_approved ? 'APPROVE_OFFICER' : 'REJECT_OFFICER',
+      entity_type: 'security_officer',
+      entity_id: id,
+      old_value: JSON.stringify({ 
+        is_approved: officer.users.is_approved, 
+        status: officer.users.status,
+        employee_id: officer.employee_id
+      }),
+      new_value: JSON.stringify({ 
+        is_approved, 
+        status: is_approved ? 'active' : 'inactive',
+        employee_id: newEmployeeId,
+        approval_notes 
+      })
+    });
 
     // ============================================
     // SUCCESS RESPONSE
@@ -2413,7 +2013,7 @@ export const approveOfficer = async (req, res) => {
       success: true,
       message: `Security officer ${is_approved ? 'approved' : 'rejected'} successfully`,
       data: {
-        ...updatedUser[0],
+        ...updatedUser,
         employee_id: newEmployeeId
       }
     });
@@ -2428,4 +2028,388 @@ export const approveOfficer = async (req, res) => {
   }
 };
 
-export default { approveUser, approveOfficer };
+/**
+ * Send OTP to admin's email
+ * @route POST /api/auth/admin/send-otp
+ */
+export const sendAdminOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    // ============================================
+    // VALIDATION
+    // ============================================
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    // ============================================
+    // CHECK IF ADMIN EXISTS
+    // ============================================
+
+    const { data: admin, error: adminError } = await supabase
+      .from('administrators')
+      .select(`
+        admin_id,
+        can_modify_system_config,
+        users!inner (
+          email,
+          first_name,
+          last_name,
+          user_type,
+          status,
+          is_approved
+        )
+      `)
+      .ilike('users.email', email)
+      .eq('users.user_type', 'admin')
+      .single();
+
+    if (adminError || !admin) {
+      return res.status(404).json({
+        success: false,
+        message: 'No administrator account found with this email'
+      });
+    }
+
+    // Check if admin account is active
+    if (admin.users.status === 'inactive' || admin.users.status === 'deleted') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your administrator account has been deactivated. Please contact support.'
+      });
+    }
+
+    // Check if admin is approved
+    if (!admin.users.is_approved) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your administrator account is pending approval.'
+      });
+    }
+
+    // ============================================
+    // GENERATE OTP
+    // ============================================
+
+    // Generate 6-digit OTP
+    const otp = crypto.randomInt(100000, 999999).toString();
+    
+    // OTP expires in 10 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // ============================================
+    // STORE OTP IN DATABASE
+    // ============================================
+
+    // Delete any existing unused OTPs for this admin
+    await supabase
+      .from('otp_tokens')
+      .delete()
+      .eq('user_id', admin.admin_id)
+      .is('used_at', null);
+
+    // Insert new OTP
+    const { error: otpError } = await supabase
+      .from('otp_tokens')
+      .insert({
+        user_id: admin.admin_id,
+        otp_code: otp,
+        expires_at: expiresAt.toISOString()
+      });
+
+    if (otpError) throw otpError;
+
+    // ============================================
+    // SEND EMAIL WITH OTP
+    // ============================================
+
+    try {
+      // Configure nodemailer transporter
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: parseInt(process.env.SMTP_PORT || '587'),
+        secure: false,
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+
+      // Email template for admin
+      const mailOptions = {
+        from: `"Neighborhood Watch Admin" <${process.env.SMTP_USER}>`,
+        to: email,
+        subject: '🔐 Admin Portal - Your Verification Code',
+        html: `
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Admin Verification Code</title>
+            </head>
+            <body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+              <div style="max-width: 600px; margin: 40px auto; background-color: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <!-- Header -->
+                <div style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); padding: 40px 20px; text-align: center;">
+                  <h1 style="color: white; margin: 0; font-size: 28px;">🔐 Administrator Access</h1>
+                </div>
+                
+                <!-- Body -->
+                <div style="padding: 40px 30px;">
+                  <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                    Hello <strong>${admin.users.first_name || 'Administrator'}</strong>,
+                  </p>
+                  
+                  <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                    Your verification code for signing in to the <strong>Admin Portal</strong> is:
+                  </p>
+                  
+                  <!-- OTP Code -->
+                  <div style="background-color: #fef2f2; border: 2px dashed #dc2626; border-radius: 8px; padding: 30px; text-align: center; margin-bottom: 30px;">
+                    <div style="font-size: 36px; font-weight: bold; color: #dc2626; letter-spacing: 8px;">
+                      ${otp}
+                    </div>
+                  </div>
+                  
+                  <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+                    <p style="color: #856404; font-size: 14px; margin: 0; line-height: 1.6;">
+                      <strong>⚠️ Security Notice:</strong> This code grants access to the administrator portal. Never share this code with anyone.
+                    </p>
+                  </div>
+                  
+                  <p style="color: #666; font-size: 14px; line-height: 1.6; margin-bottom: 20px;">
+                    This code will expire in <strong>10 minutes</strong>.
+                  </p>
+                  
+                  <p style="color: #666; font-size: 14px; line-height: 1.6;">
+                    If you didn't request this code, please contact the system administrator immediately.
+                  </p>
+                </div>
+                
+                <!-- Footer -->
+                <div style="background-color: #f8f9fa; padding: 20px 30px; border-top: 1px solid #e9ecef;">
+                  <p style="color: #999; font-size: 12px; margin: 0; text-align: center;">
+                    © ${new Date().getFullYear()} Neighborhood Watch Admin Portal. All rights reserved.
+                  </p>
+                  <p style="color: #999; font-size: 11px; margin: 10px 0 0 0; text-align: center;">
+                    This is an automated security message. Do not reply to this email.
+                  </p>
+                </div>
+              </div>
+            </body>
+          </html>
+        `,
+        text: `Admin Portal Access\n\nYour verification code is: ${otp}\n\nThis code will expire in 10 minutes.\n\nIf you didn't request this code, please contact the system administrator immediately.`,
+      };
+
+      await transporter.sendMail(mailOptions);
+
+      console.log(`✅ Admin OTP sent to ${email}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Verification code sent to your email'
+      });
+
+    } catch (emailError) {
+      console.error('❌ Error sending email:', emailError);
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send verification code. Please try again.'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Error in sendAdminOtp:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'An error occurred. Please try again.',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Verify admin OTP and sign in
+ * @route POST /api/auth/admin/verify-otp
+ */
+export const verifyAdminOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    // ============================================
+    // VALIDATION
+    // ============================================
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    if (!otp || otp.length !== 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP format. Please enter 6 digits.'
+      });
+    }
+
+    // ============================================
+    // GET ADMIN BY EMAIL
+    // ============================================
+
+    const { data: admin, error: adminError } = await supabase
+      .from('administrators')
+      .select(`
+        admin_id,
+        can_modify_system_config,
+        users!inner (
+          user_id,
+          email,
+          first_name,
+          last_name,
+          user_type,
+          status,
+          is_approved
+        )
+      `)
+      .ilike('users.email', email)
+      .eq('users.user_type', 'admin')
+      .single();
+
+    if (adminError || !admin) {
+      return res.status(404).json({
+        success: false,
+        message: 'Administrator not found'
+      });
+    }
+
+    // ============================================
+    // VERIFY OTP
+    // ============================================
+
+    const { data: otpRecord, error: otpError } = await supabase
+      .from('otp_tokens')
+      .select('otp_id, user_id, otp_code, expires_at, used_at, created_at')
+      .eq('user_id', admin.admin_id)
+      .eq('otp_code', otp)
+      .gt('expires_at', new Date().toISOString())
+      .is('used_at', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (otpError || !otpRecord) {
+      // Log failed attempt
+      await supabase.from('audit_logs').insert({
+        user_id: admin.admin_id,
+        action_type: 'FAILED_LOGIN_ATTEMPT',
+        entity_type: 'user',
+        entity_id: admin.admin_id,
+        ip_address: req.ip || req.connection?.remoteAddress || null
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired verification code'
+      });
+    }
+
+    // ============================================
+    // MARK OTP AS USED
+    // ============================================
+
+    await supabase
+      .from('otp_tokens')
+      .update({ used_at: new Date().toISOString() })
+      .eq('otp_id', otpRecord.otp_id);
+
+    // ============================================
+    // UPDATE LAST LOGIN
+    // ============================================
+
+    await supabase
+      .from('users')
+      .update({ last_login: new Date().toISOString() })
+      .eq('user_id', admin.admin_id);
+
+    // ============================================
+    // CREATE ADMIN SESSION TOKEN
+    // ============================================
+
+    // Generate secure session token
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    const tokenExpiry = new Date(Date.now() + 12 * 60 * 60 * 1000); // 12 hours for admin
+
+    // Store session in database (if you have user_sessions table)
+    try {
+      await supabase.from('user_sessions').insert({
+        user_id: admin.admin_id,
+        session_token: sessionToken,
+        expires_at: tokenExpiry.toISOString()
+      });
+    } catch (sessionError) {
+      console.log('Note: user_sessions table may not exist, skipping session storage');
+    }
+
+    // ============================================
+    // LOG SUCCESSFUL LOGIN
+    // ============================================
+
+    await supabase.from('audit_logs').insert({
+      user_id: admin.admin_id,
+      action_type: 'ADMIN_LOGIN',
+      entity_type: 'user',
+      entity_id: admin.admin_id,
+      ip_address: req.ip || req.connection?.remoteAddress || null
+    });
+
+    console.log(`✅ Admin logged in: ${email}`);
+
+    // ============================================
+    // SUCCESS RESPONSE
+    // ============================================
+
+    return res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      token: sessionToken,
+      admin: {
+        id: admin.users.user_id,
+        adminId: admin.admin_id,
+        email: admin.users.email,
+        firstName: admin.users.first_name,
+        lastName: admin.users.last_name,
+        userType: admin.users.user_type,
+        status: admin.users.status,
+        isApproved: admin.users.is_approved,
+        canModifySystemConfig: admin.can_modify_system_config
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error in verifyAdminOtp:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'An error occurred. Please try again.',
+      error: error.message
+    });
+  }
+};
