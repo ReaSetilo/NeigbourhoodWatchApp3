@@ -2413,3 +2413,355 @@ export const verifyAdminOtp = async (req, res) => {
     });
   }
 };
+
+/**
+ * Get patrol statistics
+ * @route GET /api/admin/patrol-stats
+ * @query {string} officer_id - Optional: Filter by specific officer
+ * @query {string} start_date - Optional: Filter from date (ISO format)
+ * @query {string} end_date - Optional: Filter to date (ISO format)
+ * @query {string} period - Optional: 'day', 'week', 'month', 'year', 'all' (default: 'month')
+ */
+export const getPatrolStatistics = async (req, res) => {
+  try {
+    const { officer_id, start_date, end_date, period = 'all' } = req.query;
+
+    // ============================================
+    // CALCULATE DATE RANGE BASED ON PERIOD
+    // ============================================
+    
+    let dateFilter = {};
+    const now = new Date();
+    
+    if (start_date && end_date) {
+      // Custom date range
+      dateFilter.start = new Date(start_date).toISOString();
+      dateFilter.end = new Date(end_date).toISOString();
+    } else {
+      // Predefined periods
+      switch (period) {
+        case 'day':
+          dateFilter.start = new Date(now.setHours(0, 0, 0, 0)).toISOString();
+          dateFilter.end = new Date(now.setHours(23, 59, 59, 999)).toISOString();
+          break;
+        case 'week':
+          const weekStart = new Date(now.setDate(now.getDate() - now.getDay()));
+          dateFilter.start = new Date(weekStart.setHours(0, 0, 0, 0)).toISOString();
+          dateFilter.end = new Date().toISOString();
+          break;
+        case 'month':
+          dateFilter.start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+          dateFilter.end = new Date().toISOString();
+          break;
+        case 'year':
+          dateFilter.start = new Date(now.getFullYear(), 0, 1).toISOString();
+          dateFilter.end = new Date().toISOString();
+          break;
+        case 'all':
+        default:
+          // No date filter
+          break;
+      }
+    }
+
+    // ============================================
+    // BUILD BASE QUERY
+    // ============================================
+    
+    let query = supabase
+      .from('patrol_scans')
+      .select(`
+        scan_id,
+        officer_id,
+        qr_code_id,
+        scan_timestamp,
+        comments,
+        security_officers!inner (
+          employee_id,
+          users!inner (
+            first_name,
+            last_name
+          )
+        ),
+        qr_codes!inner (
+          gate_name,
+          location_description
+        )
+      `);
+
+    // Apply filters
+    if (officer_id) {
+      query = query.eq('officer_id', officer_id);
+    }
+
+    if (dateFilter.start && dateFilter.end) {
+      query = query
+        .gte('scan_timestamp', dateFilter.start)
+        .lte('scan_timestamp', dateFilter.end);
+    }
+
+    const { data: scans, error: scansError } = await query.order('scan_timestamp', { ascending: false });
+
+    if (scansError) throw scansError;
+
+    // ============================================
+    // CALCULATE STATISTICS
+    // ============================================
+
+    // Total scans
+    const totalScans = scans?.length || 0;
+
+    // Unique officers
+    const uniqueOfficers = scans 
+      ? [...new Set(scans.map(scan => scan.officer_id))].length 
+      : 0;
+
+    // Unique locations
+    const uniqueLocations = scans 
+      ? [...new Set(scans.map(scan => scan.qr_code_id))].length 
+      : 0;
+
+    // First and last patrol
+    const firstPatrol = scans && scans.length > 0 
+      ? scans[scans.length - 1].scan_timestamp 
+      : null;
+    const lastPatrol = scans && scans.length > 0 
+      ? scans[0].scan_timestamp 
+      : null;
+
+    // ============================================
+    // OFFICER-WISE STATISTICS
+    // ============================================
+
+    const officerStats = scans 
+      ? Object.values(
+          scans.reduce((acc, scan) => {
+            const officerId = scan.officer_id;
+            
+            if (!acc[officerId]) {
+              acc[officerId] = {
+                officer_id: officerId,
+                employee_id: scan.security_officers.employee_id,
+                first_name: scan.security_officers.users.first_name,
+                last_name: scan.security_officers.users.last_name,
+                total_scans: 0,
+                unique_locations: new Set(),
+                last_patrol: null,
+                first_patrol: null
+              };
+            }
+
+            acc[officerId].total_scans++;
+            acc[officerId].unique_locations.add(scan.qr_code_id);
+            
+            if (!acc[officerId].last_patrol || scan.scan_timestamp > acc[officerId].last_patrol) {
+              acc[officerId].last_patrol = scan.scan_timestamp;
+            }
+            
+            if (!acc[officerId].first_patrol || scan.scan_timestamp < acc[officerId].first_patrol) {
+              acc[officerId].first_patrol = scan.scan_timestamp;
+            }
+
+            return acc;
+          }, {})
+        ).map(officer => ({
+          ...officer,
+          unique_locations: officer.unique_locations.size
+        }))
+      : [];
+
+    // Sort by total scans
+    officerStats.sort((a, b) => b.total_scans - a.total_scans);
+
+    // ============================================
+    // LOCATION-WISE STATISTICS
+    // ============================================
+
+    const locationStats = scans 
+      ? Object.values(
+          scans.reduce((acc, scan) => {
+            const locationId = scan.qr_code_id;
+            
+            if (!acc[locationId]) {
+              acc[locationId] = {
+                qr_code_id: locationId,
+                gate_name: scan.qr_codes.gate_name,
+                location_description: scan.qr_codes.location_description,
+                total_scans: 0,
+                unique_officers: new Set(),
+                last_patrol: null,
+                first_patrol: null
+              };
+            }
+
+            acc[locationId].total_scans++;
+            acc[locationId].unique_officers.add(scan.officer_id);
+            
+            if (!acc[locationId].last_patrol || scan.scan_timestamp > acc[locationId].last_patrol) {
+              acc[locationId].last_patrol = scan.scan_timestamp;
+            }
+            
+            if (!acc[locationId].first_patrol || scan.scan_timestamp < acc[locationId].first_patrol) {
+              acc[locationId].first_patrol = scan.scan_timestamp;
+            }
+
+            return acc;
+          }, {})
+        ).map(location => ({
+          ...location,
+          unique_officers: location.unique_officers.size
+        }))
+      : [];
+
+    // Sort by total scans
+    locationStats.sort((a, b) => b.total_scans - a.total_scans);
+
+    // ============================================
+    // TIME-BASED STATISTICS (by hour)
+    // ============================================
+
+    const hourlyDistribution = scans 
+      ? scans.reduce((acc, scan) => {
+          const hour = new Date(scan.scan_timestamp).getHours();
+          acc[hour] = (acc[hour] || 0) + 1;
+          return acc;
+        }, {})
+      : {};
+
+    // ============================================
+    // DAILY STATISTICS (for the period)
+    // ============================================
+
+    const dailyStats = scans 
+      ? Object.values(
+          scans.reduce((acc, scan) => {
+            const date = new Date(scan.scan_timestamp).toISOString().split('T')[0];
+            
+            if (!acc[date]) {
+              acc[date] = {
+                date,
+                total_scans: 0,
+                unique_officers: new Set(),
+                unique_locations: new Set()
+              };
+            }
+
+            acc[date].total_scans++;
+            acc[date].unique_officers.add(scan.officer_id);
+            acc[date].unique_locations.add(scan.qr_code_id);
+
+            return acc;
+          }, {})
+        ).map(day => ({
+          ...day,
+          unique_officers: day.unique_officers.size,
+          unique_locations: day.unique_locations.size
+        }))
+      : [];
+
+    // Sort by date
+    dailyStats.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // ============================================
+    // CALCULATE AVERAGES
+    // ============================================
+
+    const daysInPeriod = dailyStats.length || 1;
+    const averageScansPerDay = (totalScans / daysInPeriod).toFixed(2);
+    const averageLocationsPerDay = (
+      dailyStats.reduce((sum, day) => sum + day.unique_locations, 0) / daysInPeriod
+    ).toFixed(2);
+
+    // ============================================
+    // GET PATROL ANOMALIES
+    // ============================================
+
+    let anomalyQuery = supabase
+      .from('patrol_anomalies')
+      .select(`
+        anomaly_id,
+        officer_id,
+        anomaly_type,
+        detection_date,
+        status,
+        notes,
+        security_officers!inner (
+          employee_id,
+          users!inner (
+            first_name,
+            last_name
+          )
+        )
+      `);
+
+    if (officer_id) {
+      anomalyQuery = anomalyQuery.eq('officer_id', officer_id);
+    }
+
+    if (dateFilter.start && dateFilter.end) {
+      anomalyQuery = anomalyQuery
+        .gte('detection_date', dateFilter.start)
+        .lte('detection_date', dateFilter.end);
+    }
+
+    const { data: anomalies } = await anomalyQuery.order('detection_date', { ascending: false });
+
+    const anomalyStats = {
+      total: anomalies?.length || 0,
+      by_type: anomalies 
+        ? anomalies.reduce((acc, anomaly) => {
+            acc[anomaly.anomaly_type] = (acc[anomaly.anomaly_type] || 0) + 1;
+            return acc;
+          }, {})
+        : {},
+      by_status: anomalies 
+        ? anomalies.reduce((acc, anomaly) => {
+            acc[anomaly.status] = (acc[anomaly.status] || 0) + 1;
+            return acc;
+          }, {})
+        : {}
+    };
+
+    // ============================================
+    // RESPONSE
+    // ============================================
+
+    console.log(`Patrol statistics fetched for period: ${period}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Patrol statistics retrieved successfully',
+      data: {
+        summary: {
+          total_scans: totalScans,
+          unique_officers: uniqueOfficers,
+          unique_locations: uniqueLocations,
+          first_patrol: firstPatrol,
+          last_patrol: lastPatrol,
+          period,
+          date_range: dateFilter.start && dateFilter.end 
+            ? { start: dateFilter.start, end: dateFilter.end }
+            : null,
+          averages: {
+            scans_per_day: parseFloat(averageScansPerDay),
+            locations_per_day: parseFloat(averageLocationsPerDay)
+          }
+        },
+        officer_statistics: officerStats,
+        location_statistics: locationStats,
+        daily_statistics: dailyStats,
+        hourly_distribution: hourlyDistribution,
+        anomaly_statistics: anomalyStats,
+        recent_anomalies: anomalies?.slice(0, 10) || []
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching patrol statistics:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch patrol statistics',
+      error: error.message
+    });
+  }
+};

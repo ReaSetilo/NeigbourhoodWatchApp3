@@ -9,9 +9,11 @@ interface StatsCardProps {
   officers?: number;
   Otp?: number;
   twoFA?: number;
-  today?: string;
-  alerts?: string;
-  missedZones?: string;
+  todayScans?: number;
+  alerts?: number;
+  missed?: number;
+  uniqueOfficers?: number;
+  uniqueLocations?: number;
   active?: number;
   revenue?: number;
 }
@@ -25,9 +27,11 @@ const StatsCard = ({
   officers,
   Otp,
   twoFA,
-  today,
+  todayScans,
   alerts,
-  missedZones,
+  missed,
+  uniqueOfficers,
+  uniqueLocations,
   active,
   revenue
 }: StatsCardProps) => {
@@ -41,6 +45,13 @@ const StatsCard = ({
           <div className='stat-item'>
             <span className='text-gray-600'>Total:</span>
             <span className='font-medium text-dark-200'>{total}</span>
+          </div>
+        )}
+        
+        {suspended !== undefined && (
+          <div className='stat-item'>
+            <span className='text-gray-600'>Suspended:</span>
+            <span className='font-medium text-red-500'>{suspended}</span>
           </div>
         )}
         
@@ -78,23 +89,35 @@ const StatsCard = ({
           </div>
         )}
         
-        {/* Patrol Summary */}
-        {today && (
+        {/* Patrol Summary - Real Stats */}
+        {todayScans !== undefined && (
           <div className='stat-item'>
-            <span className='text-gray-600'>Today:</span>
-            <span className='font-medium text-dark-200'>{today}</span>
+            <span className='text-gray-600'>Today's Scans:</span>
+            <span className='font-medium text-blue-600'>{todayScans}</span>
           </div>
         )}
-        {alerts && (
+        {alerts !== undefined && (
           <div className='stat-item'>
             <span className='text-gray-600'>Alerts:</span>
             <span className='font-medium text-orange-500'>{alerts}</span>
           </div>
         )}
-        {missedZones && (
+        {missed !== undefined && (
           <div className='stat-item'>
-            <span className='text-gray-600'>Missed:</span>
-            <span className='font-medium text-red-500'>{missedZones}</span>
+            <span className='text-gray-600'>Missed Patrols:</span>
+            <span className='font-medium text-red-500'>{missed}</span>
+          </div>
+        )}
+        {uniqueOfficers !== undefined && (
+          <div className='stat-item'>
+            <span className='text-gray-600'>Active Officers:</span>
+            <span className='font-medium text-green-600'>{uniqueOfficers}</span>
+          </div>
+        )}
+        {uniqueLocations !== undefined && (
+          <div className='stat-item'>
+            <span className='text-gray-600'>Locations Patrolled:</span>
+            <span className='font-medium text-dark-200'>{uniqueLocations}</span>
           </div>
         )}
         
@@ -105,18 +128,10 @@ const StatsCard = ({
             <span className='font-medium text-green-600'>{active}</span>
           </div>
         )}
-        {revenue && (
+        {revenue !== undefined && (
           <div className='stat-item'>
-            <span className='text-gray-600'>Revenue: P </span>
-            <span className='font-medium text-green-600'>{revenue}</span>
-          </div>
-        )}
-        
-        {/* Show suspended count if present */}
-        {suspended !== undefined && (
-          <div className='stat-item'>
-            <span className='text-gray-600'>Suspended:</span>
-            <span className='font-medium text-red-500'>{suspended}</span>
+            <span className='text-gray-600'>Revenue: P</span>
+            <span className='font-medium text-green-600'>{revenue.toLocaleString()}</span>
           </div>
         )}
       </div>

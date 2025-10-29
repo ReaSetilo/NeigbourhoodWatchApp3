@@ -1,5 +1,5 @@
 import expres from "express";
-import { changeOfficerStatus, getAllOfficers, getOfficer, removeOfficer, removeHouse, getHouse, getHouses, removeAdmin, addAdmin, addBackHouse, getAllUsers, addUser, approveUser, approveOfficer, rejectUser, sendAdminOtp, verifyAdminOtp } from "../controllers/adminController.js";
+import { changeOfficerStatus, getAllOfficers, getOfficer, removeOfficer, removeHouse, getHouse, getHouses, removeAdmin, addAdmin, addBackHouse, getAllUsers, addUser, approveUser, approveOfficer, rejectUser, sendAdminOtp, verifyAdminOtp, getPatrolStatistics } from "../controllers/adminController.js";
 
 const router = expres.Router();
 
@@ -21,7 +21,7 @@ router.put("/officers/:id/approve", approveOfficer);
 //router.post("/members", addMember);
 router.post("/api/auth/admin/send-otp", sendAdminOtp);
 router.post("/api/auth/admin/verify-otp", verifyAdminOtp);
-
+router.get("/patrolStats", getPatrolStatistics);
 
 
 

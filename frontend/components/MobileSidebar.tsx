@@ -11,9 +11,9 @@ const MobileSidebar = () => {
     <div className='mobile-sidebar wrapper'>
       <header>
         <Link to='/'>
-            <img src='assets/icons/logo.svg'
+            <img src='/assets/images/TrakmLogo.jpg'
             alt='logo'
-            className='size-[30px]'/>
+            className='size-[40px]'/>
             <h1>TRAKM</h1>
         </Link>
         <button onClick={toggleSidebar}>

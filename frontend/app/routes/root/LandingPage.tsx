@@ -15,9 +15,9 @@ const LandingPage = () => {
             <div className='sign-in-card'>
                 <header className='header'>
                     <Link to='/'>
-                        <img src='/assets/icons/logo.svg'
+                        <img src='/assets/images/TrakmLogo.jpg'
                         alt='logo'
-                        className='size-[30px]'/>
+                        className='size-[50px]'/>
                     </Link>
                     <h1 className='p-28-bold text-dark-100'>TRAKM</h1>
                 </header>

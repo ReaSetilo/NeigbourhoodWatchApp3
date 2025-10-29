@@ -23,9 +23,12 @@ const Dashboard = () => {
             twoFAfailures: 0
         },
         patrolSummary: {
-            Today: "0 scans",
-            Alerts: "0 flagged",
-            Missed: "0"
+            todayScans: 0,
+            alerts: 0,
+            missed: 0,
+            totalScans: 0,
+            uniqueOfficers: 0,
+            uniqueLocations: 0
         },
         Subscriptions: {
             Active: 0,
@@ -55,6 +58,20 @@ const Dashboard = () => {
                 });
                 const usersData = await usersResponse.json();
 
+                // Fetch patrol statistics for today
+                const patrolTodayResponse = await fetch('http://localhost:3000/api/admin/patrolStats?period=day', {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' },
+                });
+                const patrolTodayData = await patrolTodayResponse.json();
+
+                // Fetch patrol statistics for the month (for overall context)
+                const patrolMonthResponse = await fetch('http://localhost:3000/api/admin/patrolStats?period=month', {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' },
+                });
+                const patrolMonthData = await patrolMonthResponse.json();
+
                 if (housesData.success && usersData.success) {
                     const houses = housesData.data;
                     const users = usersData.data;
@@ -69,7 +86,14 @@ const Dashboard = () => {
                     const officers = users.filter((u: any) => u.user_type === 'security_officer').length;
 
                     // Calculate subscription stats
-                    const activeSubscriptions = houses.filter((h: any) => h.subscription_status === 'active').length;
+                    const activeSubscriptions = houses.filter((h: any) => 
+                        h.neighborhood_members?.[0]?.subscription_status === 'active'
+                    ).length;
+
+                    // Extract patrol statistics
+                    const todayStats = patrolTodayData.success ? patrolTodayData.data.summary : null;
+                    const todayAnomalies = patrolTodayData.success ? patrolTodayData.data.anomaly_statistics : null;
+                    const monthStats = patrolMonthData.success ? patrolMonthData.data.summary : null;
 
                     setDashboardStats({
                         monitoredHouses: {
@@ -83,13 +107,16 @@ const Dashboard = () => {
                             total: users.length
                         },
                         SecurityLog: {
-                            OTPsent: 132, // These would come from security logs
-                            twoFAfailures: 3
+                            OTPsent: 132, // These would come from audit logs/notifications table
+                            twoFAfailures: 3  // From audit logs where action_type = 'FAILED_LOGIN_ATTEMPT'
                         },
                         patrolSummary: {
-                            Today: "122 scans", // These would come from patrol data
-                            Alerts: "4 flagged",
-                            Missed: "2"
+                            todayScans: todayStats?.total_scans || 0,
+                            alerts: todayAnomalies?.total || 0,
+                            missed: todayAnomalies?.by_type?.missed_patrol || 0,
+                            totalScans: monthStats?.total_scans || 0,
+                            uniqueOfficers: todayStats?.unique_officers || 0,
+                            uniqueLocations: todayStats?.unique_locations || 0
                         },
                         Subscriptions: {
                             Active: activeSubscriptions,
@@ -170,12 +197,16 @@ const Dashboard = () => {
                         twoFA={dashboardStats.SecurityLog.twoFAfailures}
                     />
                     
-                    <StatsCard
-                        headerTitle="Patrol Summary"
-                        today={dashboardStats.patrolSummary.Today}
-                        alerts={dashboardStats.patrolSummary.Alerts}
-                        missedZones={dashboardStats.patrolSummary.Missed}
-                    />
+                    <div onClick={() => navigate('/patrol-stats')} className="cursor-pointer hover:opacity-80 transition-opacity">
+                        <StatsCard
+                            headerTitle="Patrol Summary (Today)"
+                            todayScans={dashboardStats.patrolSummary.todayScans}
+                            alerts={dashboardStats.patrolSummary.alerts}
+                            missed={dashboardStats.patrolSummary.missed}
+                            uniqueOfficers={dashboardStats.patrolSummary.uniqueOfficers}
+                            uniqueLocations={dashboardStats.patrolSummary.uniqueLocations}
+                        />
+                    </div>
                     
                     <StatsCard
                         headerTitle="Subscription stats"

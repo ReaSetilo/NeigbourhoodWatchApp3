@@ -10,7 +10,7 @@ export const sidebarItems = [
   },
   {
     id: 2,
-    icon: "/assets/icons/users.svg",
+    icon: "/assets/icons/securityOfficer.svg",
     label: "Security Officers",
     href: "/officers",
   },
@@ -22,7 +22,7 @@ export const sidebarItems = [
   },
   {
     id: 4,
-    icon: "/assets/icons/users.svg",
+    icon: "/assets/icons/adminLogo_no_bg.png",
     label: "Admins",
     href: "/admins",
   },
@@ -31,12 +31,6 @@ export const sidebarItems = [
     icon: "/assets/icons/HousesIcon.png",
     label: "houses",
     href: "/houses",
-  },
-  {
-    id: 6,
-    icon: "/assets/icons/adminLogo_no_bg.png",
-    label: "System config",
-    href: "/system-config",
   },
 ];
 
