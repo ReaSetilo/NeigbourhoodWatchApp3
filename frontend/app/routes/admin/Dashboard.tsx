@@ -18,10 +18,6 @@ const Dashboard = () => {
             officers: 0,
             total: 0
         },
-        SecurityLog: {
-            OTPsent: 0,
-            twoFAfailures: 0
-        },
         patrolSummary: {
             todayScans: 0,
             alerts: 0,
@@ -29,10 +25,6 @@ const Dashboard = () => {
             totalScans: 0,
             uniqueOfficers: 0,
             uniqueLocations: 0
-        },
-        Subscriptions: {
-            Active: 0,
-            Revenue: 0
         }
     });
     
@@ -85,10 +77,7 @@ const Dashboard = () => {
                     const members = users.filter((u: any) => u.user_type === 'neighborhood_member').length;
                     const officers = users.filter((u: any) => u.user_type === 'security_officer').length;
 
-                    // Calculate subscription stats
-                    const activeSubscriptions = houses.filter((h: any) => 
-                        h.neighborhood_members?.[0]?.subscription_status === 'active'
-                    ).length;
+                    
 
                     // Extract patrol statistics
                     const todayStats = patrolTodayData.success ? patrolTodayData.data.summary : null;
@@ -106,10 +95,6 @@ const Dashboard = () => {
                             officers: officers,
                             total: users.length
                         },
-                        SecurityLog: {
-                            OTPsent: 132, // These would come from audit logs/notifications table
-                            twoFAfailures: 3  // From audit logs where action_type = 'FAILED_LOGIN_ATTEMPT'
-                        },
                         patrolSummary: {
                             todayScans: todayStats?.total_scans || 0,
                             alerts: todayAnomalies?.total || 0,
@@ -118,10 +103,6 @@ const Dashboard = () => {
                             uniqueOfficers: todayStats?.unique_officers || 0,
                             uniqueLocations: todayStats?.unique_locations || 0
                         },
-                        Subscriptions: {
-                            Active: activeSubscriptions,
-                            Revenue: activeSubscriptions * 150 // Assuming 150 per subscription
-                        }
                     });
                 } else {
                     throw new Error('Failed to fetch dashboard data');
@@ -141,7 +122,7 @@ const Dashboard = () => {
         return (
             <main className='dashboard wrapper'>
                 <Header
-                    title={`Welcome ${user.name} 👋`}
+                    title={`Welcome👋`}
                     description="Track activity and manage the system"
                 />
                 <div className="flex-center p-8">
@@ -191,11 +172,7 @@ const Dashboard = () => {
                         />
                     </div>
                     
-                    <StatsCard
-                        headerTitle="Security log"
-                        Otp={dashboardStats.SecurityLog.OTPsent}
-                        twoFA={dashboardStats.SecurityLog.twoFAfailures}
-                    />
+                    
                     
                     <div onClick={() => navigate('/patrol-stats')} className="cursor-pointer hover:opacity-80 transition-opacity">
                         <StatsCard
@@ -208,11 +185,7 @@ const Dashboard = () => {
                         />
                     </div>
                     
-                    <StatsCard
-                        headerTitle="Subscription stats"
-                        active={dashboardStats.Subscriptions.Active}
-                        revenue={dashboardStats.Subscriptions.Revenue}
-                    />
+                    
                 </div>
             </section>
         </main>

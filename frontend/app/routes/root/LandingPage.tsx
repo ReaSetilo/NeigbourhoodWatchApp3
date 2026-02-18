@@ -6,7 +6,7 @@ const LandingPage = () => {
     const navigate = useNavigate();
 
     const handleSignIn = () => {
-        navigate('/sign-in');
+        navigate('/dashboard');
     };
     
   return (
@@ -30,9 +30,8 @@ const LandingPage = () => {
                     className='button-class !h-11 !w-full'
                     onClick={handleSignIn}
                 >
-                    <img src='assets/icons/emal-icon.png'                    
-                    className='size-5'/>
-                    <span className='p-18-semibold text-white'>Sign in with email</span>
+                    
+                    <span className='p-18-semibold text-white'>Go to dashboard</span>
                 </Buttons.ButtonComponent>
             </div>
         </section>
