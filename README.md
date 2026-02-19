@@ -50,7 +50,7 @@ npm run dev
       <br>Tailwind CSS
     </td>
       <td align="center" width="96">
-      <img src="https://skillicons.dev/icons?i=threejs" width="48" height="48" alt="Three.js" />
+      <img src="https://skillicons.dev/icons?i=nodejs" width="48" height="48" alt="Three.js" />
       <br>Node.js
     </td>
   </tr>
@@ -71,8 +71,6 @@ npm run dev
   - Clean and professional design
     
 
-- ✉️ Email Integration
-  - Contact form using EmailJS
 
 
 </div>
