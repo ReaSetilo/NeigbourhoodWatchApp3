@@ -13,7 +13,7 @@ git clone https://github.com/ReaSetilo/NeigbourhoodWatchApp3
 2️⃣ Navigate to project directory:
 
 ```bash
-cd Portfolio-Website
+cd NeigbourhoodWatchApp3
 ```
 
 3️⃣ Install dependencies:
