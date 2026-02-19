@@ -1,14 +1,13 @@
 
 ## 🚀 Demo
 
-Experience the live portfolio at [https://portfolio-lohit.vercel.app](https://portfolio-lohit.vercel.app)
 
 ## 🛠️ Installation
 
 1️⃣ Clone the repository:
 
 ```bash
-git clone https://github.com/lohitkolluri/Portfolio-Website
+git clone https://github.com/ReaSetilo/NeigbourhoodWatchApp3
 ```
 
 2️⃣ Navigate to project directory:
@@ -20,7 +19,8 @@ cd Portfolio-Website
 3️⃣ Install dependencies:
 
 ```bash
-npm install
+npm install 
+npm install @syncfusion/ej2-base @syncfusion/ej2-react-buttons @syncfusion/ej2-react-charts @syncfusion/ej2-react-grids @syncfusion/ej2-react-dropdowns @syncfusion/ej2-react-maps @syncfusion/ej2-react-navigations @syncfusion/ej2-react-splitbuttons
 ```
 
 4️⃣ Run development server:
@@ -51,7 +51,7 @@ npm run dev
     </td>
       <td align="center" width="96">
       <img src="https://skillicons.dev/icons?i=threejs" width="48" height="48" alt="Three.js" />
-      <br>Three.js
+      <br>Node.js
     </td>
   </tr>
 </table>
@@ -64,15 +64,9 @@ npm run dev
   - Seamless experience across all devices
     
 
-- 🎯 Dynamic Content
-
-  - Interactive project showcase
-  - Engaging experience section
-  - Animated skill representations
-
 - 🎨 Modern UI/UX
 
-  - Syncfusion for material library
+  - Syncfusion for component library
   - Intuitive navigation
   - Clean and professional design
     
@@ -80,12 +74,5 @@ npm run dev
 - ✉️ Email Integration
   - Contact form using EmailJS
 
-## 📄 License
-
-<div align="center">
-
-MIT License © [Lohit Kolluri](LICENSE)
-
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&height=100&section=footer" width="100%"/>
 
 </div>
